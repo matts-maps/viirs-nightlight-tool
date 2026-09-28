@@ -167,6 +167,7 @@ the exact GAUL name instead.
 | `--freq` | yes | `daily`, `weekly`, `monthly`, or `annual` |
 | `--out` | yes | output CSV path |
 | `--geo-out` | no | optional spatial output path (`.geojson` or `.shp`), joined to the boundary geometry by the unit's unique ID/pcode (see below) |
+| `--geo-out-per-period` | no | requires `--geo-out` — also write one extra spatial file per period (see below) |
 | `--chart` | no | also write a PNG chart next to the CSV — one line chart for a single AOI, or a small-multiples grid (one mini chart per unit) with `--breakdown` (see below) |
 | `--chart-units` | no | comma-separated exact values from the output's unit-name column to chart, when using `--chart` with `--breakdown` (see below) |
 | `--ee-project` | no | your Earth Engine cloud project ID, if required (see step 2) |
@@ -378,6 +379,31 @@ name), `--geo-out ....shp` truncates and de-duplicates them automatically
 (appending `_2`, `_3`, etc. on a collision) and prints a warning listing
 exactly which names got renamed to what — GeoJSON output isn't affected by
 this limit.
+
+#### One spatial file per period: `--geo-out-per-period`
+
+The wide file's per-period columns (`mean_radiance_2021-01`, ...) work fine
+for a "change over time" symbology, but stepping through or animating months
+one at a time in a GIS is easier with a separate file per period, each using
+plain column names. Add `--geo-out-per-period` alongside `--geo-out`:
+
+```bash
+python nightlight_tool.py --aoi-file crimea_raions.geojson \
+    --unit-name-field raion_name --unit-id-field raion_pcode \
+    --start 2021-01-01 --end 2023-01-01 --freq monthly \
+    --out crimea_by_raion.csv --breakdown admin2 --ee-project ee-masims \
+    --geo-out crimea_by_raion.geojson --geo-out-per-period
+```
+
+This writes one extra file per period, named with the period appended to
+the `--geo-out` stem (`crimea_by_raion_2021-01.geojson`,
+`crimea_by_raion_2021-02.geojson`, ...), alongside — not instead of — the
+usual wide and `_by_period` long files. Each per-period file has one
+feature per unit, with that period's stats as plain columns (e.g.
+`mean_radiance`, not `mean_radiance_2021-01`), since every row in a given
+file already shares that one period. `--geo-out-per-period` has no effect
+without `--geo-out` (you'll get a warning, not an error, if you pass it
+alone).
 
 ### Choosing a frequency
 

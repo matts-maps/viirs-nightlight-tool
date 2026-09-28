@@ -282,6 +282,14 @@ class NightlightGUI:
         ttk.Button(frm, text="Save As...", command=self._on_browse_geo_out).grid(row=row, column=2, **pad)
         row += 1
 
+        self.geo_out_per_period = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            frm,
+            text="Also write one spatial file per period (e.g. per month)",
+            variable=self.geo_out_per_period,
+        ).grid(row=row, column=0, columnspan=2, sticky="w", **pad)
+        row += 1
+
         self.chart = tk.BooleanVar(value=True)
         ttk.Checkbutton(frm, text="Also write a chart PNG", variable=self.chart).grid(
             row=row, column=0, columnspan=2, sticky="w", **pad
@@ -549,6 +557,7 @@ class NightlightGUI:
             "freq": self.freq.get(),
             "out": self.out.get(),
             "geo_out": self.geo_out.get(),
+            "geo_out_per_period": self.geo_out_per_period.get(),
             "chart": self.chart.get(),
             "chart_units": self.chart_units.get(),
             "ee_project": self.ee_project.get(),
