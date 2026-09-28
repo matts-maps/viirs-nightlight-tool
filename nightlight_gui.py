@@ -278,7 +278,8 @@ class NightlightGUI:
             frm,
             text=(
                 "Spatial output path, optional\n"
-                "(.geojson or .shp, one file per period, joined by unique ID/pcode)"
+                "(.geojson or .shp, joined by unique ID/pcode -- one file per\n"
+                "period plus one combined file with every period)"
             ),
         ).grid(row=row, column=0, sticky="w", **pad)
         self.geo_out = tk.StringVar()

@@ -33,6 +33,7 @@ from nightlight_tool import (
     split_rows_by_period,
     summarize_pixels,
     write_csv,
+    write_geo_outputs_combined,
     write_geo_outputs_per_period,
 )
 
@@ -943,6 +944,57 @@ def test_write_geo_outputs_per_period_rejects_unsupported_extension(tmp_path):
     rows_by_period = {"2026-01": [{"geometry": Point(0, 0)}]}
     try:
         write_geo_outputs_per_period(rows_by_period, tmp_path / "out.gpkg")
+    except ValueError as e:
+        assert ".geojson" in str(e) and ".shp" in str(e)
+    else:
+        raise AssertionError("expected ValueError for an unsupported --geo-out extension")
+
+
+# --- write_geo_outputs_combined (--geo-out, every period in one file) ------
+
+
+def test_write_geo_outputs_combined_writes_one_file_with_every_period(tmp_path):
+    import geopandas as gpd
+    from shapely.geometry import Point
+
+    rows = [
+        {"adm2_pcode": "P1", "period": "2026-01", "mean_radiance": 1.0, "geometry": Point(0, 0)},
+        {"adm2_pcode": "P2", "period": "2026-01", "mean_radiance": 2.0, "geometry": Point(1, 0)},
+        {"adm2_pcode": "P1", "period": "2026-02", "mean_radiance": 1.5, "geometry": Point(0, 0)},
+        {"adm2_pcode": "P2", "period": "2026-02", "mean_radiance": 2.5, "geometry": Point(1, 0)},
+    ]
+    written = write_geo_outputs_combined(rows, tmp_path / "out.geojson")
+    assert written == tmp_path / "out_all_periods.geojson"
+    assert written.exists()
+
+    gdf = gpd.read_file(written)
+    # one feature per (unit, period) pair -- the one-to-many join, same row
+    # shape as the CSV -- geometry repeated for each period
+    assert len(gdf) == 4
+    assert "period" in gdf.columns
+    assert sorted(gdf["period"]) == ["2026-01", "2026-01", "2026-02", "2026-02"]
+    assert "mean_radiance" in gdf.columns
+
+
+def test_write_geo_outputs_combined_shapefile_applies_field_truncation(tmp_path):
+    import geopandas as gpd
+    from shapely.geometry import Point
+
+    rows = [
+        {"some_very_long_attribute_name": "x", "period": "2026-01", "geometry": Point(0, 0)},
+    ]
+    written = write_geo_outputs_combined(rows, tmp_path / "out.shp")
+    assert written == tmp_path / "out_all_periods.shp"
+    gdf = gpd.read_file(written)
+    assert all(len(c) <= 10 for c in gdf.columns if c != "geometry")
+
+
+def test_write_geo_outputs_combined_rejects_unsupported_extension(tmp_path):
+    from shapely.geometry import Point
+
+    rows = [{"geometry": Point(0, 0)}]
+    try:
+        write_geo_outputs_combined(rows, tmp_path / "out.gpkg")
     except ValueError as e:
         assert ".geojson" in str(e) and ".shp" in str(e)
     else:

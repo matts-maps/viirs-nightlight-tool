@@ -835,6 +835,25 @@ def write_geo_outputs_per_period(
     return written
 
 
+def write_geo_outputs_combined(rows: list[dict], out_path: Path) -> Path:
+    """Write ONE spatial file containing every row across every period --
+    the "one to many" join Matt asked for: one feature per (unit, period)
+    pair, geometry repeated per period, so it has the same row shape as the
+    CSV. Unlike write_geo_outputs_per_period, the "period" column is kept
+    (it's the only thing distinguishing rows for the same unit here, since
+    there's no per-period filename to carry that instead). Named
+    "<stem>_all_periods<ext>" next to `out_path`, alongside the per-period
+    files write_geo_outputs_per_period writes to that same `out_path`.
+
+    Doesn't touch `ee` -- only geopandas file I/O -- so it's testable
+    offline the same way write_geo_outputs_per_period is.
+    """
+    driver = _geo_out_driver(out_path)
+    combined_path = out_path.with_name(f"{out_path.stem}_all_periods{out_path.suffix}")
+    _write_geo_file(rows, combined_path, driver)
+    return combined_path
+
+
 def resolve_breakdown_collection(
     aoi_file: Optional[str],
     aoi_name: Optional[str],
@@ -1061,9 +1080,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "extension: .geojson or .shp. Writes one file per period (month/week/year/day, "
             "whichever --freq is), named '<stem>_<period><ext>' next to this path -- one "
             "feature per unit, with the unit's name/ID/attributes columns plus mean_radiance, "
-            "sum_radiance, median_radiance, valid_pixel_count, scene_count, and qa_flag. Works "
-            "with or without --breakdown -- without it, there's just one implicit 'unit' (the "
-            "whole AOI)."
+            "sum_radiance, median_radiance, valid_pixel_count, scene_count, and qa_flag -- plus "
+            "one combined file with every period in it (one feature per unit per period, same "
+            "row shape as the CSV, geometry repeated per period), named '<stem>_all_periods<ext>'. "
+            "Works with or without --breakdown -- without it, there's just one implicit 'unit' "
+            "(the whole AOI)."
         ),
     )
     p.add_argument(
@@ -1444,8 +1465,8 @@ def run_wizard() -> list[str]:
     argv += ["--out", _prompt_text("Output CSV path", default="out/nightlights.csv")]
 
     if _prompt_yes_no(
-        "Also write spatial output (GeoJSON/Shapefile), one file per period, joined by "
-        "the unit's unique ID/pcode?",
+        "Also write spatial output (GeoJSON/Shapefile), joined by the unit's unique "
+        "ID/pcode -- one file per period plus one combined file with every period?",
         default=False,
     ):
         geo_out = _prompt_text(
@@ -1506,7 +1527,7 @@ def build_argv_from_form(fields: dict) -> list[str]:
         freq: one of VALID_FREQS (required)
         out: str, output CSV path (required)
         geo_out: str -- optional path for a joined spatial output (.geojson or .shp),
-            written as one file per period
+            written as one file per period plus one combined file with every period
         chart: bool
         chart_units: str (comma-separated) or list[str] -- only used if chart
             and breakdown_level are both set
@@ -1760,6 +1781,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         rows_by_period = split_rows_by_period(geo_rows)
         try:
             per_period_paths = write_geo_outputs_per_period(rows_by_period, geo_out_path)
+            combined_path = write_geo_outputs_combined(geo_rows, geo_out_path)
         except ValueError as e:
             print(str(e), file=sys.stderr)
             return 1
@@ -1767,6 +1789,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             f"Wrote {len(per_period_paths)} spatial file(s), one per period: "
             f"{', '.join(str(p) for p in per_period_paths.values())}"
         )
+        print(f"Wrote 1 combined spatial file with every period (one unit-period per row): {combined_path}")
 
     if args.chart:
         chart_path = out_path.with_suffix(".png")

@@ -166,7 +166,7 @@ the exact GAUL name instead.
 | `--start`, `--end` | yes | ISO dates, `--end` is exclusive |
 | `--freq` | yes | `daily`, `weekly`, `monthly`, or `annual` |
 | `--out` | yes | output CSV path |
-| `--geo-out` | no | optional spatial output path (`.geojson` or `.shp`), one file per period, joined to the boundary geometry by the unit's unique ID/pcode (see below) |
+| `--geo-out` | no | optional spatial output path (`.geojson` or `.shp`), joined to the boundary geometry by the unit's unique ID/pcode — one file per period plus one combined file with every period (see below) |
 | `--chart` | no | also write a PNG chart next to the CSV — one line chart for a single AOI, or a small-multiples grid (one mini chart per unit) with `--breakdown` (see below) |
 | `--chart-units` | no | comma-separated exact values from the output's unit-name column to chart, when using `--chart` with `--breakdown` (see below) |
 | `--ee-project` | no | your Earth Engine cloud project ID, if required (see step 2) |
@@ -366,14 +366,23 @@ unit, with:
 - `mean_radiance`, `sum_radiance`, `median_radiance`, `valid_pixel_count`,
   `scene_count`, `qa_flag`
 
-Splitting by period this way (rather than one combined file with every
-period bundled in) makes it straightforward to step through or animate
-months one at a time in a GIS, or load a single period's file to symbolize
-on its own. The period itself isn't repeated as a column, since it's
-already at the end of every filename.
+Splitting by period this way makes it straightforward to step through or
+animate months one at a time in a GIS, or load a single period's file to
+symbolize on its own. The period itself isn't repeated as a column in these
+files, since it's already at the end of every filename.
+
+Alongside those, `--geo-out` also writes **one combined file with every
+period in it** — `crimea_by_raion_all_periods.geojson` — a one-to-many join
+of unit → periods: one feature per unit *per period* (so the same unit's
+geometry repeats once per period), matching the CSV's row shape. This one
+keeps a `period` column, since that's the only thing telling rows for the
+same unit apart. Use this file when you want to symbolize, filter, or chart
+by period inside a single layer (e.g. a time-slider) rather than switching
+between per-period files.
 
 `--geo-out` works with or without `--breakdown` — without it, there's just
-one "unit" (the whole AOI), so each period's file has a single feature.
+one "unit" (the whole AOI), so each period's file has a single feature (and
+the combined file has one feature per period).
 
 Shapefile field names are capped at 10 characters by the format itself. If
 any of your column names are longer (or two get truncated down to the same
