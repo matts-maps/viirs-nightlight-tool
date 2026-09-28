@@ -128,6 +128,7 @@ the exact GAUL name instead.
 | `--ee-project` | no | your Earth Engine cloud project ID, if required (see step 2) |
 | `--breakdown` | no | `admin1` or `admin2` — output one row per sub-unit per period instead of one row per period (see below) |
 | `--unit-name-field` | no | required alongside `--breakdown` when using `--aoi-file` (see below) |
+| `--unit-id-field` | no | column in `--aoi-file` holding each unit's unique ID, typically a pcode (see below) |
 | `--attributes` | no | comma-separated field/column names to include as extra columns in `--breakdown` output (see below) |
 | `--simplify-tolerance` | no | simplify `--aoi-file` geometries by this many degrees before sending to Earth Engine — only relevant to `--breakdown --aoi-file` with a detailed layer (see below) |
 | `--wizard` | no | run the interactive prompt instead of using flags (also runs automatically with no arguments) |
@@ -149,9 +150,11 @@ This looks up FAO GAUL admin1 (governorate/oblast-level) or admin2
 each period in a single Earth Engine call (not one call per unit — that
 matters once you're at admin2 scale, which can be hundreds of units).
 
-Output columns add `unit_name`, `admin0_name`, `admin1_name`, `admin2_name`
-(blank where not applicable) alongside the usual radiance/QA columns — so you
-can pivot or join straight into a spreadsheet or GIS. `--chart` in this mode
+Output columns add `unit_name`, `unit_id`, `admin0_name`, `admin1_name`,
+`admin2_name` (blank where not applicable) alongside the usual radiance/QA
+columns — so you can pivot or join straight into a spreadsheet or GIS.
+`unit_id` is filled in automatically here from GAUL's own `ADM1_CODE`/
+`ADM2_CODE`, so it's always populated with `--aoi-name`. `--chart` in this mode
 writes a small-multiples PNG (one mini chart per unit) instead of a single
 shared chart, since one line per district isn't legible once there are more
 than a handful:
@@ -189,6 +192,30 @@ python nightlight_tool.py --aoi-file crimea_raions.geojson --unit-name-field rai
 (Here `--breakdown admin2` is just a label for the output — with `--aoi-file`,
 every feature in the file is kept separate regardless of which admin level
 you name.)
+
+#### Giving each unit a stable ID: `--unit-id-field`
+
+`--unit-name-field` picks a human-readable label, but names aren't always
+unique — two districts in different states can share a name, and even where
+they don't, names get renamed/respelled in ways a stable code never does.
+Whenever your boundary file has a unique-ID column (most admin boundary
+sources — HDX COD, fieldmaps.io — ship one, usually called something like
+`ADM2_PCODE`), point `--unit-id-field` at it:
+
+```bash
+python nightlight_tool.py --aoi-file crimea_raions.geojson \
+    --unit-name-field raion_name --unit-id-field raion_pcode \
+    --start 2021-01-01 --end 2023-01-01 --freq monthly \
+    --out crimea_by_raion.csv --breakdown admin2 --ee-project ee-masims
+```
+
+This adds a `unit_id` column to the output alongside `unit_name`, so you can
+join back onto other datasets (or your GIS layer) by the stable code rather
+than a name that might not match exactly. It's optional but recommended
+whenever names might collide; if you skip it, `unit_id` is just blank. With
+`--aoi-name` (GAUL), you don't need this at all — `unit_id` is filled in for
+you automatically from GAUL's `ADM1_CODE`/`ADM2_CODE`. The interactive
+`--wizard` asks for this right after the unit-name column.
 
 #### Choosing which attributes end up in the output: `--attributes`
 

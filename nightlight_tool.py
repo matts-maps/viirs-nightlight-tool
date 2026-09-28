@@ -157,10 +157,18 @@ def build_breakdown_row(
     --aoi-file). This is how the caller picks what ends up in the CSV instead of
     always getting the three hardcoded GAUL admin-name columns below, which stay
     as the default for backward compatibility when no fields are requested.
+
+    `unit_id` (in `feature_properties`) is always surfaced as its own column,
+    separate from `attribute_fields` -- it's the stable, unique identifier for
+    the unit (a GAUL ADM*_CODE, or whichever column the user pointed at as a
+    unique key, e.g. a pcode) as opposed to `unit_name`, which is
+    human-readable but not guaranteed unique (two municipios can share a
+    name). It's None when the caller didn't have one to set.
     """
     row: dict = {
         "period": period_label,
         "unit_name": feature_properties.get("unit_name"),
+        "unit_id": feature_properties.get("unit_id"),
     }
     if attribute_fields:
         for field in attribute_fields:
@@ -603,6 +611,7 @@ def resolve_breakdown_collection(
     unit_name_field: Optional[str],
     simplify_tolerance: Optional[float] = None,
     attribute_fields: Optional[list[str]] = None,
+    unit_id_field: Optional[str] = None,
 ):
     """Return an ee.FeatureCollection of sub-units to break the analysis down by,
     each carrying a 'unit_name' property.
@@ -618,15 +627,24 @@ def resolve_breakdown_collection(
     properties natively, so nothing extra is needed there; for --aoi-file the
     requested columns are read from the boundary file and validated here, the
     same way --unit-name-field already is.
+
+    Every unit also gets a 'unit_id' property -- a stable, unique identifier,
+    as opposed to 'unit_name' which is only meant to be human-readable and can
+    collide (two municipios sharing a name in different states, say). For
+    --aoi-name this is filled in automatically from GAUL's own ADM1_CODE/
+    ADM2_CODE, since those always exist. For --aoi-file it comes from
+    `unit_id_field` -- typically a pcode column -- which is optional but
+    strongly recommended whenever unit names might not be unique; when it's
+    not given, 'unit_id' is left None for every unit.
     """
     import ee
 
     if aoi_name:
         level_map = {
-            "admin1": ("FAO/GAUL/2015/level1", "ADM1_NAME"),
-            "admin2": ("FAO/GAUL/2015/level2", "ADM2_NAME"),
+            "admin1": ("FAO/GAUL/2015/level1", "ADM1_NAME", "ADM1_CODE"),
+            "admin2": ("FAO/GAUL/2015/level2", "ADM2_NAME", "ADM2_CODE"),
         }
-        asset_id, name_field = level_map[breakdown]
+        asset_id, name_field, id_field = level_map[breakdown]
         fc = ee.FeatureCollection(asset_id).filter(ee.Filter.eq("ADM0_NAME", aoi_name))
         count = fc.size().getInfo()
         if count == 0:
@@ -635,7 +653,9 @@ def resolve_breakdown_collection(
                 f"{asset_id}. GAUL's country naming can differ from common usage "
                 "— check spelling/capitalisation."
             )
-        return fc.map(lambda f: f.set("unit_name", f.get(name_field)))
+        return fc.map(
+            lambda f: f.set("unit_name", f.get(name_field)).set("unit_id", f.get(id_field))
+        )
 
     if aoi_file:
         if not unit_name_field:
@@ -652,6 +672,11 @@ def resolve_breakdown_collection(
             raise ValueError(
                 f"{unit_name_field!r} not found in {aoi_file} columns: {list(gdf.columns)}"
             )
+        if unit_id_field and unit_id_field not in gdf.columns:
+            raise ValueError(
+                f"--unit-id-field {unit_id_field!r} not found in {aoi_file} columns: "
+                f"{list(gdf.columns)}"
+            )
         if attribute_fields:
             missing = [f for f in attribute_fields if f not in gdf.columns]
             if missing:
@@ -661,7 +686,10 @@ def resolve_breakdown_collection(
                 )
         features = []
         for _, row in gdf.iterrows():
-            properties = {"unit_name": row[unit_name_field]}
+            properties = {
+                "unit_name": row[unit_name_field],
+                "unit_id": row[unit_id_field] if unit_id_field else None,
+            }
             if attribute_fields:
                 for field in attribute_fields:
                     properties[field] = row[field]
@@ -691,15 +719,21 @@ def fetch_period_breakdown_stats(
 
     if image is None:
         unit_names = fc.aggregate_array("unit_name").getInfo()
+        try:
+            unit_ids = fc.aggregate_array("unit_id").getInfo()
+        except Exception:  # noqa: BLE001 -- older collections may not carry unit_id
+            unit_ids = []
+        if len(unit_ids) != len(unit_names):
+            unit_ids = [None] * len(unit_names)
         return [
             build_breakdown_row(
                 period.label,
                 band,
-                {"unit_name": name},
+                {"unit_name": name, "unit_id": uid},
                 scene_count=0,
                 attribute_fields=attribute_fields,
             )
-            for name in unit_names
+            for name, uid in zip(unit_names, unit_ids)
         ]
 
     reduced = image.select(band).reduceRegions(
@@ -776,6 +810,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--unit-name-field",
         default=None,
         help="Property/column in --aoi-file to label each unit with, when using --breakdown with --aoi-file",
+    )
+    p.add_argument(
+        "--unit-id-field",
+        default=None,
+        help=(
+            "Property/column in --aoi-file that uniquely identifies each unit (typically a "
+            "pcode), when using --breakdown with --aoi-file. Included as its own 'unit_id' "
+            "column in the output -- unlike --unit-name-field, which is only guaranteed to be "
+            "human-readable, not unique (two municipios can share a name). With --aoi-name, "
+            "unit_id is filled in automatically from FAO GAUL's ADM1_CODE/ADM2_CODE, so this "
+            "flag isn't needed there."
+        ),
     )
     p.add_argument(
         "--attributes",
@@ -856,6 +902,17 @@ def _prompt_single_field(label: str, available_fields: Optional[list[str]]) -> s
         if not available_fields or val in available_fields:
             return val
         print(f"  '{val}' isn't one of the columns/fields listed above -- enter exactly one.")
+
+
+def _prompt_optional_field(label: str, available_fields: Optional[list[str]]) -> str:
+    """Like _prompt_single_field, but blank is an accepted answer (for an
+    optional field like a unique-ID column that not every boundary file has).
+    """
+    while True:
+        val = _prompt_text(label, default="").strip()
+        if not val or not available_fields or val in available_fields:
+            return val
+        print(f"  '{val}' isn't one of the columns/fields listed above -- enter exactly one, or leave blank.")
 
 
 def _prompt_field_list(label: str, available_fields: Optional[list[str]]) -> str:
@@ -969,6 +1026,14 @@ def run_wizard() -> list[str]:
                 _prompt_single_field("Which column names each unit", available_fields),
             ]
 
+            unit_id_field = _prompt_optional_field(
+                "Which column uniquely identifies each unit, e.g. a pcode "
+                "(recommended, especially if unit names might repeat -- blank to skip)",
+                available_fields,
+            )
+            if unit_id_field:
+                argv += ["--unit-id-field", unit_id_field]
+
             file_size_mb = None
             try:
                 file_size_mb = Path(aoi_file).stat().st_size / (1024 * 1024)
@@ -1008,6 +1073,11 @@ def run_wizard() -> list[str]:
                     print(f"ISO3 {aoi_iso3!r} matched FAO GAUL country {gaul_country_name!r}.")
                 except Exception as e:  # noqa: BLE001
                     print(f"  (Couldn't resolve ISO3 {aoi_iso3!r} to a GAUL country yet: {e})")
+
+            print(
+                f"(Each unit's unique ID will be filled in automatically from GAUL's own "
+                f"ADM{1 if breakdown == 'admin1' else 2}_CODE -- no need to pick one.)"
+            )
 
             available_fields = []
             if gaul_country_name:
@@ -1141,6 +1211,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             args.unit_name_field,
             simplify_tolerance=args.simplify_tolerance,
             attribute_fields=attribute_fields,
+            unit_id_field=args.unit_id_field,
         )
         unit_count = fc.size().getInfo()
         print(f"Breaking down into {unit_count} {args.breakdown} units.", file=sys.stderr)

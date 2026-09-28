@@ -246,6 +246,24 @@ def test_build_breakdown_row_no_data():
     assert row["qa_flag"] == "no_data"
 
 
+def test_build_breakdown_row_carries_unit_id():
+    # unit_id is the stable/unique identifier (a GAUL ADM*_CODE, or whichever
+    # column the user pointed --unit-id-field at, e.g. a pcode) -- surfaced as
+    # its own column separately from attribute_fields, since unlike unit_name
+    # it's meant to be unique even when names collide.
+    props = {"unit_name": "Independencia", "unit_id": "VE1301", "avg_rad_mean": 2.1}
+    row = build_breakdown_row("2024-01", "avg_rad", props, scene_count=1)
+    assert row["unit_id"] == "VE1301"
+
+
+def test_build_breakdown_row_unit_id_defaults_to_none():
+    # No unit_id_field was set, so unit_id is just absent from the source
+    # properties -- the column should still exist in the row, as None, not
+    # be silently dropped.
+    row = build_breakdown_row("2024-01", "avg_rad", {"unit_name": "X"}, scene_count=1)
+    assert row["unit_id"] is None
+
+
 def test_simplify_geometry_none_tolerance_is_noop():
     from shapely.geometry import Point
 
