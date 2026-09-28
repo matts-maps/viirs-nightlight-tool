@@ -84,6 +84,35 @@ python nightlight_tool.py --wizard
 This is the same code path as the flag-based CLI underneath — the wizard just
 builds the flags for you, so anything documented below applies either way.
 
+### GUI mode
+
+Prefer forms and dropdowns to a terminal? `nightlight_gui.py` is a Tkinter
+window with the same options as the wizard (AOI source, granularity,
+attribute/unit-ID columns, dates, frequency, chart, Earth Engine project),
+plus file/save dialogs and a live log panel instead of typed prompts:
+
+```bash
+python nightlight_gui.py
+```
+
+It needs the same environment as the CLI (steps 1–2 above), plus `tkinter`
+itself, which ships with most Python installs but is a separate OS package on
+some Linux distros:
+
+```bash
+sudo apt-get install python3-tk   # Debian/Ubuntu, if `import tkinter` fails
+```
+
+Like the wizard, the GUI is a thin front end over the exact same
+`build_arg_parser()`/`main()` path the CLI uses underneath — it just collects
+your choices into a form instead of prompts, then runs the query in a
+background thread so the window doesn't freeze while Earth Engine works,
+streaming progress into the log panel at the bottom. Choosing your own
+boundary file unlocks Admin 3–5 granularity and the unit-name/unit-ID/simplify
+fields, same as in the wizard; a "Load available columns" button reads the
+file (or looks up FAO GAUL's fields) and fills in dropdowns so you don't have
+to retype column names by hand.
+
 When you choose to break down by admin unit, the wizard looks up and prints
 the actual fields available before asking which to include as
 `--attributes` columns — the columns in your file for `--aoi-file`, or the

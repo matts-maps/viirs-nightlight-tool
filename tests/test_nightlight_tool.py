@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from nightlight_tool import (
     build_arg_parser,
+    build_argv_from_form,
     build_breakdown_row,
     build_periods,
     list_file_fields,
@@ -553,6 +554,165 @@ def test_select_breakdown_chart_units_falls_back_to_name_without_unit_id():
     rows = [{"unit_name": name, "period": "2022-01"} for name in ["Kyiv", "Odesa", "Kyiv"]]
     units = select_breakdown_chart_units(rows)
     assert units == ["Kyiv", "Odesa"]
+
+
+# ---------------------------------------------------------------------------
+# build_argv_from_form -- the GUI's argv-building core (no Tkinter involved)
+# ---------------------------------------------------------------------------
+
+def test_build_argv_from_form_minimal_iso3_no_breakdown():
+    argv = build_argv_from_form(
+        {
+            "aoi_source": "iso3",
+            "aoi_iso3": "ukr",
+            "start": "2026-01-01",
+            "end": "2026-04-01",
+            "freq": "monthly",
+            "out": "out/nightlights.csv",
+        }
+    )
+    assert argv == [
+        "--aoi-iso3", "UKR",
+        "--start", "2026-01-01",
+        "--end", "2026-04-01",
+        "--freq", "monthly",
+        "--out", "out/nightlights.csv",
+    ]
+    # and it should be accepted by the real parser, not just look plausible
+    args = build_arg_parser().parse_args(argv)
+    assert args.aoi_iso3 == "UKR"
+    assert args.breakdown is None
+
+
+def test_build_argv_from_form_gaul_breakdown_admin1():
+    argv = build_argv_from_form(
+        {
+            "aoi_source": "name",
+            "aoi_name": "Ukraine",
+            "breakdown_level": 1,
+            "attributes": ["ADM0_NAME", "ADM1_CODE"],
+            "start": "2026-01-01",
+            "end": "2026-02-01",
+            "freq": "monthly",
+            "out": "o.csv",
+            "chart": True,
+            "ee_project": "my-ee-project",
+        }
+    )
+    args = build_arg_parser().parse_args(argv)
+    assert args.aoi_name == "Ukraine"
+    assert args.breakdown == "admin1"
+    assert args.attributes == "ADM0_NAME,ADM1_CODE"
+    assert args.chart is True
+    assert args.chart_units is None  # no unit filter given
+    assert args.ee_project == "my-ee-project"
+
+
+def test_build_argv_from_form_rejects_admin3_for_gaul_source():
+    # Mirrors the wizard's granularity cap -- FAO GAUL only carries
+    # admin1/admin2, so a country/name lookup can't go to admin3+.
+    try:
+        build_argv_from_form(
+            {
+                "aoi_source": "name",
+                "aoi_name": "Ukraine",
+                "breakdown_level": 3,
+                "start": "2026-01-01",
+                "end": "2026-02-01",
+                "freq": "monthly",
+                "out": "o.csv",
+            }
+        )
+    except ValueError as e:
+        assert "admin1/admin2" in str(e) or "Admin3" in str(e)
+    else:
+        raise AssertionError("expected ValueError for admin3 with a GAUL source")
+
+
+def test_build_argv_from_form_file_breakdown_requires_unit_name_field():
+    try:
+        build_argv_from_form(
+            {
+                "aoi_source": "file",
+                "aoi_file": "aoi.geojson",
+                "breakdown_level": 3,
+                "start": "2026-01-01",
+                "end": "2026-02-01",
+                "freq": "monthly",
+                "out": "o.csv",
+            }
+        )
+    except ValueError as e:
+        assert "unit" in str(e).lower()
+    else:
+        raise AssertionError("expected ValueError when unit_name_field is missing")
+
+
+def test_build_argv_from_form_file_breakdown_admin3_with_all_fields():
+    argv = build_argv_from_form(
+        {
+            "aoi_source": "file",
+            "aoi_file": "aoi.geojson",
+            "breakdown_level": 3,
+            "unit_name_field": "adm3_name",
+            "unit_id_field": "adm3_pcode",
+            "simplify_tolerance": "0.001",
+            "attributes": "adm0_name, adm0_pcode",
+            "start": "2026-05-01",
+            "end": "2026-09-01",
+            "freq": "monthly",
+            "out": "out/ven3.csv",
+            "chart": True,
+            "chart_units": ["Independencia", "Sucre"],
+        }
+    )
+    args = build_arg_parser().parse_args(argv)
+    assert args.aoi_file == "aoi.geojson"
+    assert args.breakdown == "admin3"
+    assert args.unit_name_field == "adm3_name"
+    assert args.unit_id_field == "adm3_pcode"
+    assert args.simplify_tolerance == 0.001
+    assert args.attributes == "adm0_name, adm0_pcode"
+    assert args.chart is True
+    assert args.chart_units == "Independencia,Sucre"
+
+
+def test_build_argv_from_form_chart_units_ignored_without_breakdown():
+    # --chart-units only makes sense alongside --breakdown -- a whole-AOI
+    # chart has exactly one line, there's nothing to filter by unit.
+    argv = build_argv_from_form(
+        {
+            "aoi_source": "iso3",
+            "aoi_iso3": "UKR",
+            "start": "2026-01-01",
+            "end": "2026-02-01",
+            "freq": "monthly",
+            "out": "o.csv",
+            "chart": True,
+            "chart_units": ["should", "be", "ignored"],
+        }
+    )
+    assert "--chart-units" not in argv
+    assert "--chart" in argv
+
+
+def test_build_argv_from_form_requires_dates_and_out():
+    for missing in ("start", "end", "out"):
+        fields = {
+            "aoi_source": "iso3",
+            "aoi_iso3": "UKR",
+            "start": "2026-01-01",
+            "end": "2026-02-01",
+            "freq": "monthly",
+            "out": "o.csv",
+        }
+        fields[missing] = ""
+        try:
+            build_argv_from_form(fields)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"expected ValueError with {missing!r} missing")
 
 
 if __name__ == "__main__":

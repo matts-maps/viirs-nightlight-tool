@@ -1241,6 +1241,136 @@ def run_wizard() -> list[str]:
     return argv
 
 
+def build_argv_from_form(fields: dict) -> list[str]:
+    """Pure function: turn a plain dict of form values into the argv list
+    build_arg_parser().parse_args() expects.
+
+    This is the GUI's equivalent of run_wizard() -- same one-code-path
+    principle (build an argv list, then let build_arg_parser()/main() do the
+    actual validation and work), but driven by a plain dict of already-chosen
+    values instead of interactive input() prompts, so it's usable from a
+    Tkinter form (or tested directly, with no widgets involved at all).
+
+    Expected keys (all optional except as noted; unmentioned/None/empty
+    values are treated as "not set"):
+        aoi_source: "iso3" | "name" | "file"  (required)
+        aoi_iso3, aoi_name, aoi_file: str -- whichever matches aoi_source
+        breakdown_level: int 0-5 (0 or omitted = no --breakdown, whole AOI)
+        unit_name_field: str -- required when aoi_source == "file" and
+            breakdown_level > 0
+        unit_id_field: str
+        simplify_tolerance: str/float -- only meaningful with aoi_source == "file"
+        attributes: str (comma-separated) or list[str]
+        start, end: str, YYYY-MM-DD (required)
+        freq: one of VALID_FREQS (required)
+        out: str, output CSV path (required)
+        chart: bool
+        chart_units: str (comma-separated) or list[str] -- only used if chart
+            and breakdown_level are both set
+        ee_project: str
+
+    Raises ValueError with a message fit to show the user directly (e.g. in
+    a message box) when something required is missing or inconsistent --
+    the same checks build_arg_parser()/main() would eventually surface, just
+    caught earlier with a friendlier message than an argparse error or a
+    raw exception partway through a run.
+    """
+    argv: list[str] = []
+
+    aoi_source = fields.get("aoi_source")
+    if aoi_source == "iso3":
+        iso3 = (fields.get("aoi_iso3") or "").strip().upper()
+        if not iso3:
+            raise ValueError("Enter an ISO3 country code (e.g. 'UKR').")
+        argv += ["--aoi-iso3", iso3]
+    elif aoi_source == "name":
+        name = (fields.get("aoi_name") or "").strip()
+        if not name:
+            raise ValueError("Enter a country or admin-unit name.")
+        argv += ["--aoi-name", name]
+    elif aoi_source == "file":
+        path = (fields.get("aoi_file") or "").strip()
+        if not path:
+            raise ValueError("Choose a boundary file.")
+        argv += ["--aoi-file", path]
+    else:
+        raise ValueError("Choose an area-of-interest source (ISO3 code, name, or file).")
+
+    breakdown_level = fields.get("breakdown_level") or 0
+    if breakdown_level:
+        if breakdown_level not in (1, 2, 3, 4, 5):
+            raise ValueError("Granularity must be Admin 0-5.")
+        if aoi_source != "file" and breakdown_level > 2:
+            raise ValueError(
+                f"Admin{breakdown_level} isn't available with a country lookup -- FAO GAUL "
+                "only carries admin1/admin2 below country level. Supply your own boundary "
+                "file for admin3 or finer."
+            )
+        argv += ["--breakdown", f"admin{breakdown_level}"]
+
+        if aoi_source == "file":
+            unit_name_field = (fields.get("unit_name_field") or "").strip()
+            if not unit_name_field:
+                raise ValueError("Choose which column names each unit.")
+            argv += ["--unit-name-field", unit_name_field]
+
+            unit_id_field = (fields.get("unit_id_field") or "").strip()
+            if unit_id_field:
+                argv += ["--unit-id-field", unit_id_field]
+
+            tolerance = fields.get("simplify_tolerance")
+            if tolerance not in (None, ""):
+                try:
+                    float(tolerance)
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        f"Simplify tolerance {tolerance!r} isn't a number -- enter a "
+                        "decimal-degree value (e.g. 0.001) or leave it blank."
+                    )
+                argv += ["--simplify-tolerance", str(tolerance)]
+
+        attributes = fields.get("attributes")
+        if attributes:
+            if isinstance(attributes, (list, tuple)):
+                attributes = ",".join(a for a in attributes if a)
+            attributes = attributes.strip()
+            if attributes:
+                argv += ["--attributes", attributes]
+
+    start = (fields.get("start") or "").strip()
+    end = (fields.get("end") or "").strip()
+    if not start or not end:
+        raise ValueError("Enter both a start and end date (YYYY-MM-DD).")
+    argv += ["--start", start, "--end", end]
+
+    freq = fields.get("freq")
+    if freq not in VALID_FREQS:
+        raise ValueError(f"Choose a frequency ({', '.join(VALID_FREQS)}).")
+    argv += ["--freq", freq]
+
+    out = (fields.get("out") or "").strip()
+    if not out:
+        raise ValueError("Choose an output CSV path.")
+    argv += ["--out", out]
+
+    if fields.get("chart"):
+        argv.append("--chart")
+        if breakdown_level:
+            chart_units = fields.get("chart_units")
+            if isinstance(chart_units, (list, tuple)):
+                chart_units = ",".join(c for c in chart_units if c)
+            if chart_units:
+                chart_units = chart_units.strip()
+                if chart_units:
+                    argv += ["--chart-units", chart_units]
+
+    ee_project = (fields.get("ee_project") or "").strip()
+    if ee_project:
+        argv += ["--ee-project", ee_project]
+
+    return argv
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     raw_argv = sys.argv[1:] if argv is None else argv
     if not raw_argv or "--wizard" in raw_argv:
