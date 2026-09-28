@@ -123,7 +123,8 @@ the exact GAUL name instead.
 | `--start`, `--end` | yes | ISO dates, `--end` is exclusive |
 | `--freq` | yes | `daily`, `weekly`, `monthly`, or `annual` |
 | `--out` | yes | output CSV path |
-| `--chart` | no | also write a PNG line chart next to the CSV (ignored with `--breakdown`, see below) |
+| `--chart` | no | also write a PNG chart next to the CSV — one line chart for a single AOI, or a small-multiples grid (one mini chart per unit) with `--breakdown` (see below) |
+| `--chart-units` | no | comma-separated exact `unit_name` values to chart, when using `--chart` with `--breakdown` (see below) |
 | `--ee-project` | no | your Earth Engine cloud project ID, if required (see step 2) |
 | `--breakdown` | no | `admin1` or `admin2` — output one row per sub-unit per period instead of one row per period (see below) |
 | `--unit-name-field` | no | required alongside `--breakdown` when using `--aoi-file` (see below) |
@@ -150,9 +151,30 @@ matters once you're at admin2 scale, which can be hundreds of units).
 
 Output columns add `unit_name`, `admin0_name`, `admin1_name`, `admin2_name`
 (blank where not applicable) alongside the usual radiance/QA columns — so you
-can pivot or join straight into a spreadsheet or GIS. `--chart` is skipped in
-this mode (a single line chart with one line per district isn't a useful
-chart) — pivot the CSV by `unit_name` yourself for a per-unit view.
+can pivot or join straight into a spreadsheet or GIS. `--chart` in this mode
+writes a small-multiples PNG (one mini chart per unit) instead of a single
+shared chart, since one line per district isn't legible once there are more
+than a handful:
+
+```bash
+python nightlight_tool.py --aoi-name "Yemen" --breakdown admin1 \
+    --start 2014-01-01 --end 2023-01-01 --freq annual \
+    --out yemen_by_governorate.csv --chart --ee-project ee-masims
+```
+
+If there are more than 30 units, `--chart` charts the first 30 and warns you
+— use `--chart-units` to pick specific ones instead (exact `unit_name`
+values, comma-separated):
+
+```bash
+python nightlight_tool.py --aoi-name "Yemen" --breakdown admin1 \
+    --start 2014-01-01 --end 2023-01-01 --freq annual \
+    --out yemen_by_governorate.csv --chart --chart-units "Sana'a,Aden,Ta'izz" \
+    --ee-project ee-masims
+```
+
+(A deliberate `--chart-units` selection is never truncated, however many you
+list — the 30-panel cap only applies to the "chart everything" default.)
 
 You can also break down a boundary file you supply yourself instead of a GAUL
 lookup, by adding `--unit-name-field` to say which column/property in the file
@@ -321,11 +343,9 @@ Towards a tool anyone can pick up without reading this whole README first:
 - **Clipped raster export** — an `--export-clipped-raster` style flag that
   also writes the reduced VIIRS image for an AOI as a small GeoTIFF, for
   visual sanity-checking of the mask/clip in a GIS.
-- **Chart support in `--breakdown` mode** — currently skipped there (one line
-  per unit isn't useful at admin1/2 scale); a per-unit small-multiples chart
-  or a "pick N units to chart" option would close this gap.
-
 Already delivered towards the "anyone can use it" goal: `--wizard` interactive
 mode (which also shows the actual admin-data fields available before you pick
 `--attributes`), `weekly` frequency, `--attributes` for choosing output
-columns, and `--aoi-iso3` for unambiguous country selection.
+columns, `--aoi-iso3` for unambiguous country selection, and small-multiples
+`--chart` support in `--breakdown` mode (`--chart-units` to pick specific
+units).

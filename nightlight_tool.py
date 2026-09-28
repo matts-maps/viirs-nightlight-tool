@@ -243,6 +243,94 @@ def write_csv(rows: Iterable[dict], out_path: Path, fieldnames: Optional[list[st
         writer.writerows(rows)
 
 
+DEFAULT_MAX_BREAKDOWN_CHART_PANELS = 30
+
+
+def select_breakdown_chart_units(
+    rows: list[dict],
+    unit_filter: Optional[list[str]] = None,
+    max_panels: int = DEFAULT_MAX_BREAKDOWN_CHART_PANELS,
+) -> list[str]:
+    """Pure function: decide which units a --breakdown chart should draw one
+    panel for, and in what order.
+
+    With `unit_filter` given (exact unit_name values, as the user typed them),
+    returns just those, in the order given -- deliberate selection needs no
+    cap. Without a filter, returns every unit that appears in `rows`, in
+    first-seen order, unless that's more than `max_panels`, in which case it
+    truncates and the caller is expected to warn (a chart with hundreds of
+    tiny panels isn't useful, and the fix is to either narrow with
+    --chart-units or just pivot the CSV yourself for a full per-unit view).
+    """
+    seen: list[str] = []
+    seen_set = set()
+    for row in rows:
+        name = row.get("unit_name")
+        if name is not None and name not in seen_set:
+            seen.append(name)
+            seen_set.add(name)
+
+    if unit_filter:
+        return [name for name in unit_filter if name in seen_set]
+
+    return seen[:max_panels]
+
+
+def write_breakdown_chart(
+    rows: list[dict],
+    chart_path: Path,
+    units: list[str],
+    value_field: str = "mean_radiance",
+) -> None:
+    """Write a small-multiples PNG: one mini line chart per unit in `units`,
+    each showing `value_field` over `period`. Companion to write_chart() for
+    --breakdown output, where a single shared chart with one line per unit
+    isn't legible once there are more than a handful of units.
+    """
+    import math
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    if not units:
+        raise ValueError("no units to chart")
+
+    by_unit: dict[str, list[dict]] = {u: [] for u in units}
+    for row in rows:
+        name = row.get("unit_name")
+        if name in by_unit:
+            by_unit[name].append(row)
+
+    n = len(units)
+    ncols = min(4, n)
+    nrows = math.ceil(n / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.2 * ncols, 3.0 * nrows), squeeze=False)
+
+    for i, unit in enumerate(units):
+        ax = axes[i // ncols][i % ncols]
+        unit_rows = by_unit[unit]
+        labels = [r["period"] for r in unit_rows]
+        values = [r.get(value_field) for r in unit_rows]
+        ax.plot(labels, values, marker="o", linewidth=1.2, markersize=3)
+        ax.set_title(str(unit), fontsize=9)
+        ax.tick_params(axis="x", rotation=60, labelsize=7)
+        ax.tick_params(axis="y", labelsize=7)
+        for flag_row in unit_rows:
+            if flag_row.get("qa_flag") not in (None, "ok"):
+                ax.axvspan(flag_row["period"], flag_row["period"], color="red", alpha=0.15)
+
+    # Hide any unused grid cells (n doesn't always divide evenly into the grid).
+    for i in range(n, nrows * ncols):
+        axes[i // ncols][i % ncols].axis("off")
+
+    fig.suptitle(f"VIIRS nighttime-lights radiance by unit ({value_field.replace('_', ' ')})")
+    fig.tight_layout()
+    chart_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(chart_path, dpi=150)
+    plt.close(fig)
+
+
 def write_chart(rows: list[dict], chart_path: Path, value_field: str = "mean_radiance") -> None:
     import matplotlib
     matplotlib.use("Agg")
@@ -650,7 +738,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--freq", required=True, choices=VALID_FREQS, help="Time step")
     p.add_argument("--out", required=True, help="Output CSV path")
     p.add_argument(
-        "--chart", action="store_true", help="Also write a PNG chart next to the CSV"
+        "--chart",
+        action="store_true",
+        help=(
+            "Also write a PNG chart next to the CSV. Without --breakdown, one line "
+            "chart for the whole AOI. With --breakdown, a small-multiples grid with "
+            "one mini chart per unit (see --chart-units to limit which ones)."
+        ),
+    )
+    p.add_argument(
+        "--chart-units",
+        default=None,
+        help=(
+            "Comma-separated exact unit_name values to chart, when using --chart with "
+            "--breakdown. If omitted, every unit is charted, up to "
+            f"{DEFAULT_MAX_BREAKDOWN_CHART_PANELS} -- beyond that the chart is truncated "
+            "with a warning, since a grid of hundreds of tiny panels isn't useful."
+        ),
     )
     p.add_argument(
         "--ee-project",
@@ -889,6 +993,19 @@ def run_wizard() -> list[str]:
     if breakdown_choice == 0:
         if _prompt_yes_no("Also write a chart PNG next to the CSV?", default=True):
             argv.append("--chart")
+    else:
+        if _prompt_yes_no(
+            "Also write a chart PNG (one mini chart per unit) next to the CSV?",
+            default=True,
+        ):
+            argv.append("--chart")
+            chart_units = _prompt_text(
+                "Which units to chart, comma-separated exact unit_name values "
+                f"(blank to chart all, up to {DEFAULT_MAX_BREAKDOWN_CHART_PANELS})",
+                default="",
+            )
+            if chart_units.strip():
+                argv += ["--chart-units", chart_units.strip()]
 
     if not ee_project_asked:
         ee_project = _prompt_text(
@@ -987,15 +1104,31 @@ def main(argv: Optional[list[str]] = None) -> int:
     print(f"Wrote {len(rows)} rows to {out_path}")
 
     if args.chart:
+        chart_path = out_path.with_suffix(".png")
         if args.breakdown:
-            print(
-                "Note: --chart is skipped in --breakdown mode (one line per unit "
-                "isn't a useful chart at admin1/admin2 scale) — pivot the CSV by "
-                "unit_name yourself for a per-unit view.",
-                file=sys.stderr,
+            chart_units = (
+                [u.strip() for u in args.chart_units.split(",") if u.strip()]
+                if args.chart_units
+                else None
             )
+            all_units = select_breakdown_chart_units(rows, unit_filter=chart_units, max_panels=len(rows) + 1)
+            units = all_units if chart_units else all_units[:DEFAULT_MAX_BREAKDOWN_CHART_PANELS]
+            if not units:
+                print(
+                    "Note: --chart-units matched no units in the output -- skipping chart. "
+                    "Check the spelling against the unit_name column.",
+                    file=sys.stderr,
+                )
+            else:
+                if chart_units is None and len(all_units) > len(units):
+                    print(
+                        f"Note: charting the first {len(units)} of {len(all_units)} units "
+                        "-- use --chart-units to pick specific ones instead.",
+                        file=sys.stderr,
+                    )
+                write_breakdown_chart(rows, chart_path, units)
+                print(f"Wrote chart ({len(units)} unit panels) to {chart_path}")
         else:
-            chart_path = out_path.with_suffix(".png")
             write_chart(rows, chart_path)
             print(f"Wrote chart to {chart_path}")
 

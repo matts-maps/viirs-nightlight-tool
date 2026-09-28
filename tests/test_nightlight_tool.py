@@ -21,6 +21,7 @@ from nightlight_tool import (
     list_file_fields,
     qa_flag,
     resolve_iso3_candidate_names,
+    select_breakdown_chart_units,
     simplify_geometry,
     summarize_pixels,
     write_csv,
@@ -315,6 +316,37 @@ def test_resolve_iso3_candidate_names_rejects_unknown_code():
         pass
     else:
         raise AssertionError("expected ValueError for an unrecognised ISO3 code")
+
+
+def _breakdown_rows_for(unit_names):
+    return [{"unit_name": name, "period": "2022-01"} for name in unit_names]
+
+
+def test_select_breakdown_chart_units_no_filter_first_seen_order():
+    rows = _breakdown_rows_for(["Kyiv", "Odesa", "Kyiv", "Lviv"])
+    assert select_breakdown_chart_units(rows) == ["Kyiv", "Odesa", "Lviv"]
+
+
+def test_select_breakdown_chart_units_respects_max_panels_cap():
+    rows = _breakdown_rows_for([f"unit{i}" for i in range(50)])
+    units = select_breakdown_chart_units(rows, max_panels=5)
+    assert units == [f"unit{i}" for i in range(5)]
+
+
+def test_select_breakdown_chart_units_explicit_filter_ignores_cap():
+    # A deliberate --chart-units selection is never truncated, even if it's
+    # longer than max_panels -- the cap only protects the "chart everything"
+    # default from producing hundreds of unreadable panels.
+    rows = _breakdown_rows_for([f"unit{i}" for i in range(10)])
+    requested = [f"unit{i}" for i in range(8)]
+    units = select_breakdown_chart_units(rows, unit_filter=requested, max_panels=3)
+    assert units == requested
+
+
+def test_select_breakdown_chart_units_filter_drops_unknown_names():
+    rows = _breakdown_rows_for(["Kyiv", "Odesa"])
+    units = select_breakdown_chart_units(rows, unit_filter=["Kyiv", "Nonexistent"])
+    assert units == ["Kyiv"]
 
 
 def test_list_file_fields_excludes_geometry():
