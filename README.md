@@ -103,17 +103,29 @@ some Linux distros:
 sudo apt-get install python3-tk   # Debian/Ubuntu, if `import tkinter` fails
 ```
 
+For calendar-style date pickers on the Start/End date fields, also install
+the optional `tkcalendar` package:
+
+```bash
+pip install tkcalendar
+```
+
+This is GUI-only and intentionally not in `requirements.txt` (the CLI/wizard
+have no GUI dependency to begin with). Without it, the date fields fall back
+to plain typed entry, exactly as before — nothing else changes.
+
 Like the wizard, the GUI is a thin front end over the exact same
 `build_arg_parser()`/`main()` path the CLI uses underneath — it just collects
 your choices into a form instead of prompts, then runs the query in a
 background thread so the window doesn't freeze while Earth Engine works,
 streaming progress into the log panel at the bottom. Choosing your own
 boundary file unlocks Admin 3–5 granularity and the unit-name/unit-ID/simplify
-fields, same as in the wizard; picking a file (or clicking "Load available
-columns" for a GAUL country/name lookup, which needs Earth Engine set up
-already) fills in dropdowns for the unit-name/unit-ID columns and a
-tickable checklist for extra `--attributes` columns, so you don't have to
-retype column names by hand.
+fields, same as in the wizard, and auto-loads its columns into the
+unit-name/unit-ID dropdowns and a scrollable, tickable checklist of extra
+`--attributes` columns as soon as you pick the file — no separate "Load
+available columns" click needed. For a GAUL country/name lookup, where
+there's no file to auto-trigger from, the "Load available columns" button
+(which needs Earth Engine set up already) still does the same job.
 
 When you choose to break down by admin unit, the wizard looks up and prints
 the actual fields available before asking which to include as

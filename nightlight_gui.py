@@ -32,6 +32,15 @@ from nightlight_tool import (
 )
 from nightlight_tool import main as run_main
 
+try:
+    # Optional: gives the date fields an actual calendar picker. Not in
+    # requirements.txt (it's GUI-only, and the CLI/wizard shouldn't need a
+    # GUI dependency) -- `pip install tkcalendar` to enable it. Without it,
+    # the date fields fall back to plain text entry, same as before.
+    from tkcalendar import DateEntry
+except ImportError:  # pragma: no cover -- exercised by not having the package installed
+    DateEntry = None
+
 ADMIN_LEVEL_LABELS = [
     "Whole AOI -- one time series (Admin 0)",
     "Admin 1 (e.g. oblast/governorate/state)",
@@ -41,6 +50,11 @@ ADMIN_LEVEL_LABELS = [
     "Admin 5 (finest level your data has)",
 ]
 GAUL_ADMIN_LEVEL_LABELS = ADMIN_LEVEL_LABELS[:3]  # FAO GAUL only goes to admin2
+
+# Floor for the shared label-column width computed in _build_widgets() (see
+# there for why it's computed rather than just hardcoded) -- only matters if
+# every label turns out to be unexpectedly short.
+FIELD_LABEL_MINSIZE = 300
 
 
 class _QueueWriter:
@@ -181,9 +195,14 @@ class NightlightGUI:
         # frame wouldn't scroll.
         attrs_outer = ttk.Frame(self.breakdown_frame)
         attrs_outer.grid(row=b_row, column=1, sticky="w", **pad)
-        self.attributes_canvas = tk.Canvas(attrs_outer, height=110, width=260, highlightthickness=0)
+        # Plain tk widgets (not ttk) below, because ttk widgets use themed
+        # styles and ignore a simple bg= override -- we need a real, solid
+        # white behind the whole scrollable checkbox panel.
+        self.attributes_canvas = tk.Canvas(
+            attrs_outer, height=110, width=260, highlightthickness=0, bg="white"
+        )
         attrs_scrollbar = ttk.Scrollbar(attrs_outer, orient="vertical", command=self.attributes_canvas.yview)
-        self.attributes_inner = ttk.Frame(self.attributes_canvas)
+        self.attributes_inner = tk.Frame(self.attributes_canvas, bg="white")
         self.attributes_inner.bind(
             "<Configure>",
             lambda e: self.attributes_canvas.configure(scrollregion=self.attributes_canvas.bbox("all")),
@@ -193,6 +212,8 @@ class NightlightGUI:
         self.attributes_canvas.pack(side="left", fill="both", expand=True)
         attrs_scrollbar.pack(side="right", fill="y")
         self._attribute_vars: dict[str, tk.BooleanVar] = {}
+        self._bind_mousewheel(self.attributes_canvas)
+        self._bind_mousewheel(self.attributes_inner)
         b_row += 1
 
         ttk.Label(self.breakdown_frame, text="Simplify tolerance, degrees\n(own file only, e.g. 0.001)").grid(
@@ -213,12 +234,12 @@ class NightlightGUI:
 
         ttk.Label(frm, text="Start date (YYYY-MM-DD, inclusive)").grid(row=row, column=0, sticky="w", **pad)
         self.start = tk.StringVar()
-        ttk.Entry(frm, textvariable=self.start, width=14).grid(row=row, column=1, sticky="w", **pad)
+        self._make_date_widget(frm, self.start).grid(row=row, column=1, sticky="w", **pad)
         row += 1
 
         ttk.Label(frm, text="End date (YYYY-MM-DD, exclusive)").grid(row=row, column=0, sticky="w", **pad)
         self.end = tk.StringVar()
-        ttk.Entry(frm, textvariable=self.end, width=14).grid(row=row, column=1, sticky="w", **pad)
+        self._make_date_widget(frm, self.end).grid(row=row, column=1, sticky="w", **pad)
         row += 1
 
         ttk.Label(frm, text="Frequency").grid(row=row, column=0, sticky="w", **pad)
@@ -266,6 +287,46 @@ class NightlightGUI:
         self.log.grid(row=row, column=0, columnspan=3, sticky="nsew", **pad)
         frm.rowconfigure(row, weight=1)
 
+        # Align the nested "Breakdown options" box's label column with the
+        # rest of the form. A ttk.LabelFrame keeps its own, independent
+        # grid, so its column 0 auto-sizes to its own (shorter) labels
+        # regardless of how wide the outer form's column 0 ends up -- a
+        # fixed guess at the right width would drift out of sync the moment
+        # a label's wording changes. Instead, measure the widest
+        # single-column label actually rendered in either grid, once all of
+        # them exist, and pin both columns to that width.
+        frm.update_idletasks()
+        label_col_width = FIELD_LABEL_MINSIZE
+        for container in (frm, self.breakdown_frame):
+            for child in container.grid_slaves(column=0):
+                if int(child.grid_info().get("columnspan", 1)) == 1:
+                    label_col_width = max(label_col_width, child.winfo_reqwidth())
+        frm.columnconfigure(0, minsize=label_col_width)
+        self.breakdown_frame.columnconfigure(0, minsize=label_col_width)
+
+    def _make_date_widget(self, parent: tk.Widget, variable: tk.StringVar) -> tk.Widget:
+        """A start/end date field, as a real calendar picker when tkcalendar
+        is installed, or a plain text entry when it isn't. Both back onto
+        the same StringVar in "YYYY-MM-DD" form, so build_argv_from_form()
+        (and everything downstream of it) can't tell which widget produced
+        the value -- this is presentation only.
+        """
+        if DateEntry is not None:
+            # DateEntry writes today's date into textvariable as soon as
+            # it's constructed, which would silently defeat
+            # build_argv_from_form()'s "you must enter both a start and end
+            # date" check for anyone who doesn't touch the field. Put the
+            # variable back to whatever it held before construction (blank,
+            # for a fresh field) so the field still starts empty and the
+            # required-field validation still applies -- the calendar
+            # picker itself still works exactly the same once clicked.
+            had_value = variable.get()
+            widget = DateEntry(parent, textvariable=variable, date_pattern="yyyy-mm-dd", width=12)
+            if not had_value:
+                variable.set("")
+            return widget
+        return ttk.Entry(parent, textvariable=variable, width=14)
+
     # ------------------------------------------------------------------
     # Dynamic enable/disable as the AOI source and granularity change
     # ------------------------------------------------------------------
@@ -282,7 +343,16 @@ class NightlightGUI:
         is_file = self.aoi_source.get() == "file"
 
         self._set_attribute_checkboxes_state(breakdown_on)
-        self.load_fields_button.configure(state="normal" if breakdown_on else "disabled")
+        # "Load available columns" is only needed for the GAUL name/ISO3
+        # path -- picking a boundary file already auto-loads its columns
+        # (see _on_browse_aoi_file), so the button would just be a
+        # redundant, always-a-no-op-after-the-fact control there. Use
+        # grid()/grid_remove() rather than disabling it, so it's not just
+        # greyed out but actually gone when it wouldn't do anything.
+        if breakdown_on and not is_file:
+            self.load_fields_button.grid()
+        else:
+            self.load_fields_button.grid_remove()
         # "normal" (editable), not "readonly" -- these need to stay typeable
         # even when "Load available columns" hasn't been clicked yet, or
         # failed (unreadable file, unsupported format). Matching the
@@ -378,8 +448,18 @@ class NightlightGUI:
         self._attribute_vars = {}
         for f in fields:
             var = tk.BooleanVar(value=False)
-            ttk.Checkbutton(self.attributes_inner, text=f, variable=var).pack(anchor="w")
+            cb = tk.Checkbutton(
+                self.attributes_inner,
+                text=f,
+                variable=var,
+                bg="white",
+                activebackground="white",
+                highlightthickness=0,
+                anchor="w",
+            )
+            cb.pack(anchor="w", fill="x")
             self._attribute_vars[f] = var
+            self._bind_mousewheel(cb)
         self._set_attribute_checkboxes_state(bool(self.breakdown_level()))
         self.attributes_canvas.configure(scrollregion=self.attributes_canvas.bbox("all"))
 
@@ -387,6 +467,30 @@ class NightlightGUI:
         state = "normal" if enabled else "disabled"
         for child in self.attributes_inner.winfo_children():
             child.configure(state=state)
+
+    def _bind_mousewheel(self, widget: tk.Widget) -> None:
+        """Let the mouse wheel scroll the attribute checkbox panel while the
+        cursor is over `widget`. Wheel events go to whatever widget is
+        directly under the cursor, not to the canvas that owns the
+        scrollbar, so the canvas itself, its inner frame, and every
+        checkbox inside it each need this binding (checkboxes are rebuilt
+        on every _populate_field_widgets() call, so this is called again
+        for each new one). Windows/macOS report <MouseWheel> with a signed
+        event.delta; X11 (Linux) reports scroll up/down as separate
+        <Button-4>/<Button-5> events instead.
+        """
+        widget.bind("<MouseWheel>", self._on_attributes_mousewheel)
+        widget.bind("<Button-4>", self._on_attributes_mousewheel)
+        widget.bind("<Button-5>", self._on_attributes_mousewheel)
+
+    def _on_attributes_mousewheel(self, event: "tk.Event") -> None:
+        if getattr(event, "num", None) == 4:
+            delta = -1
+        elif getattr(event, "num", None) == 5:
+            delta = 1
+        else:
+            delta = -1 if event.delta > 0 else 1
+        self.attributes_canvas.yview_scroll(delta, "units")
 
     # ------------------------------------------------------------------
     # Collecting form values -> the pure argv-building function
