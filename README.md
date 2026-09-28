@@ -434,6 +434,22 @@ python nightlight_tool.py --aoi-file crimea_raions.geojson \
 A `_pct` column is blank (not a divide-by-zero error) whenever the value
 being compared against is `0` — percent change from zero is undefined.
 
+**Treat `_abs` as the headline number, `_pct` as noisy, especially near
+zero.** VIIRS radiance sits near zero across a lot of area/time (a quiet
+rural district on an ordinary night), and percent change gets wild there —
+a tiny, meaningless absolute change against a near-zero denominator can
+read as a huge percentage even though nothing real happened, while the same
+absolute change against a bright unit barely moves the percentage at all.
+This isn't hypothetical: an earlier raster-based change layer built for
+this same Crimea/Ukraine analysis hit a 99.9th-percentile percent-change of
+17,349% (max 4.75 million percent) driven entirely by near-zero-radiance
+pixels, and one rayon's mean *absolute* change was slightly negative
+(−0.10 nW/cm²/sr — essentially flat) while its mean *percent* change read
++157%, purely from averaging ratios with near-zero denominators. Lead with
+`_change_abs`/`_vs_baseline_abs` when deciding whether something real
+happened; use the `_pct` columns as a secondary check, and be skeptical of
+a large `_pct` value paired with a small `_abs` value.
+
 ### Choosing a frequency
 
 - **monthly** (recommended default) uses NOAA's pre-composited, cloud-free
