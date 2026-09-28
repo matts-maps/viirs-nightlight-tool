@@ -644,6 +644,13 @@ def resolve_breakdown_collection(
             "admin1": ("FAO/GAUL/2015/level1", "ADM1_NAME", "ADM1_CODE"),
             "admin2": ("FAO/GAUL/2015/level2", "ADM2_NAME", "ADM2_CODE"),
         }
+        if breakdown not in level_map:
+            raise ValueError(
+                f"--breakdown {breakdown} isn't available with --aoi-name/--aoi-iso3 -- "
+                "FAO GAUL 2015 only carries admin1 and admin2 below the country level. "
+                "For finer units (admin3+), supply your own boundary file with --aoi-file "
+                "instead (the admin level there is just a label for the output)."
+            )
         asset_id, name_field, id_field = level_map[breakdown]
         fc = ee.FeatureCollection(asset_id).filter(ee.Filter.eq("ADM0_NAME", aoi_name))
         count = fc.size().getInfo()
@@ -797,13 +804,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--breakdown",
-        choices=("admin1", "admin2"),
+        choices=("admin1", "admin2", "admin3", "admin4", "admin5"),
         default=None,
         help=(
             "Instead of one AOI-wide row per period, output one row per admin unit "
             "per period. With --aoi-name, looks up FAO GAUL admin1/admin2 units "
-            "within that country. With --aoi-file, keeps each feature in the file "
-            "separate (needs --unit-name-field)."
+            "within that country -- admin3-5 aren't available from GAUL (it only "
+            "carries levels 0-2), so those choices only work with --aoi-file. With "
+            "--aoi-file, keeps each feature in the file separate (needs "
+            "--unit-name-field) and the admin level is just a label for the output."
         ),
     )
     p.add_argument(
@@ -954,7 +963,12 @@ def list_gaul_fields(aoi_name: str, breakdown: str, ee_project: Optional[str] = 
 
     _ensure_ee_initialized(ee_project)
 
-    asset_id = {"admin1": "FAO/GAUL/2015/level1", "admin2": "FAO/GAUL/2015/level2"}[breakdown]
+    asset_ids = {"admin1": "FAO/GAUL/2015/level1", "admin2": "FAO/GAUL/2015/level2"}
+    if breakdown not in asset_ids:
+        raise ValueError(
+            f"FAO GAUL doesn't have {breakdown} units -- it only goes down to admin2"
+        )
+    asset_id = asset_ids[breakdown]
     fc = ee.FeatureCollection(asset_id).filter(ee.Filter.eq("ADM0_NAME", aoi_name))
     if fc.size().getInfo() == 0:
         return []
@@ -998,16 +1012,25 @@ def run_wizard() -> list[str]:
         aoi_file = _prompt_text("Path to your boundary file")
         argv += ["--aoi-file", aoi_file]
 
-    breakdown_choice = _prompt_choice(
-        "Granularity",
-        [
-            "Whole AOI as a single unit (one time series)",
-            "Break down by admin1 (e.g. oblast/governorate/state)",
-            "Break down by admin2 (e.g. raion/district/municipio)",
-        ],
-    )
+    admin_level_labels = [
+        "Admin 0 -- whole AOI as a single unit (one time series)",
+        "Admin 1 (e.g. oblast/governorate/state)",
+        "Admin 2 (e.g. raion/district/municipio)",
+        "Admin 3 (e.g. commune/ward)",
+        "Admin 4 (e.g. village/sub-ward)",
+        "Admin 5 (finest level your data has)",
+    ]
+    if aoi_choice == 2:  # own file -- the level is just a label, any depth is fine
+        granularity_options = admin_level_labels
+    else:  # GAUL-backed -- FAO GAUL 2015 only carries country/admin1/admin2
+        granularity_options = admin_level_labels[:3]
+        print(
+            "\n(FAO GAUL only goes down to admin2 -- for admin3 or finer, supply your "
+            "own boundary file instead.)"
+        )
+    breakdown_choice = _prompt_choice("Granularity", granularity_options)
     if breakdown_choice != 0:
-        breakdown = "admin1" if breakdown_choice == 1 else "admin2"
+        breakdown = f"admin{breakdown_choice}"
         argv += ["--breakdown", breakdown]
 
         if aoi_choice == 2:  # own file

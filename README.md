@@ -126,7 +126,7 @@ the exact GAUL name instead.
 | `--chart` | no | also write a PNG chart next to the CSV — one line chart for a single AOI, or a small-multiples grid (one mini chart per unit) with `--breakdown` (see below) |
 | `--chart-units` | no | comma-separated exact `unit_name` values to chart, when using `--chart` with `--breakdown` (see below) |
 | `--ee-project` | no | your Earth Engine cloud project ID, if required (see step 2) |
-| `--breakdown` | no | `admin1` or `admin2` — output one row per sub-unit per period instead of one row per period (see below) |
+| `--breakdown` | no | `admin1`–`admin5` — output one row per sub-unit per period instead of one row per period (see below). With `--aoi-name`/`--aoi-iso3`, only `admin1`/`admin2` are available (that's as far down as FAO GAUL goes); `admin3`–`admin5` need `--aoi-file` |
 | `--unit-name-field` | no | required alongside `--breakdown` when using `--aoi-file` (see below) |
 | `--unit-id-field` | no | column in `--aoi-file` holding each unit's unique ID, typically a pcode (see below) |
 | `--attributes` | no | comma-separated field/column names to include as extra columns in `--breakdown` output (see below) |
@@ -149,6 +149,11 @@ This looks up FAO GAUL admin1 (governorate/oblast-level) or admin2
 (district/raion-level) units within that country, and queries all of them for
 each period in a single Earth Engine call (not one call per unit — that
 matters once you're at admin2 scale, which can be hundreds of units).
+`--aoi-name`/`--aoi-iso3` only go down to admin2, since that's as far as FAO
+GAUL carries boundaries — for admin3 (commune/ward), admin4, or admin5, supply
+your own boundary file with `--aoi-file` instead (see below); there the admin
+level you pass is just a label, since every feature in the file is already
+its own unit regardless of which government tier it represents.
 
 Output columns add `unit_name`, `unit_id`, `admin0_name`, `admin1_name`,
 `admin2_name` (blank where not applicable) alongside the usual radiance/QA

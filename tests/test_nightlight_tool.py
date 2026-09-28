@@ -16,10 +16,12 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from nightlight_tool import (
+    build_arg_parser,
     build_breakdown_row,
     build_periods,
     list_file_fields,
     qa_flag,
+    resolve_breakdown_collection,
     resolve_iso3_candidate_names,
     select_breakdown_chart_units,
     simplify_geometry,
@@ -375,6 +377,42 @@ def test_list_file_fields_excludes_geometry():
     assert "geometry" not in fields
     assert "name" in fields
     assert "note" in fields
+
+
+def test_build_arg_parser_accepts_admin3_through_5_for_aoi_file():
+    # --aoi-file breakdown just uses the admin level as an output label, so
+    # nothing stops finer levels than GAUL (which tops out at admin2).
+    p = build_arg_parser()
+    for level in ("admin3", "admin4", "admin5"):
+        args = p.parse_args(
+            [
+                "--aoi-file", "x.geojson",
+                "--unit-name-field", "name",
+                "--breakdown", level,
+                "--start", "2024-01-01",
+                "--end", "2024-02-01",
+                "--freq", "monthly",
+                "--out", "o.csv",
+            ]
+        )
+        assert args.breakdown == level
+
+
+def test_resolve_breakdown_collection_rejects_unsupported_gaul_level():
+    # FAO GAUL 2015 only carries admin1/admin2 below country level -- asking
+    # for admin3+ with --aoi-name should fail fast with a clear message
+    # pointing at --aoi-file, not a raw KeyError from the level lookup table.
+    import sys
+    import types
+
+    sys.modules.setdefault("ee", types.ModuleType("ee"))
+    try:
+        resolve_breakdown_collection(None, "Ukraine", "admin3", None)
+    except ValueError as e:
+        assert "admin3" in str(e)
+        assert "aoi-file" in str(e)
+    else:
+        raise AssertionError("expected ValueError for unsupported GAUL admin level")
 
 
 def test_write_csv_rejects_empty(tmp_path):
