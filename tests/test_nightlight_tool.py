@@ -61,11 +61,27 @@ def test_build_periods_rejects_bad_range():
 
 def test_build_periods_rejects_bad_freq():
     try:
-        build_periods("2022-01-01", "2022-02-01", "weekly")
+        build_periods("2022-01-01", "2022-02-01", "fortnightly")
     except ValueError:
         pass
     else:
         raise AssertionError("expected ValueError for unsupported freq")
+
+
+def test_build_periods_weekly():
+    # 2022-01-03 is a Monday (ISO week 1). Range covers three full ISO weeks.
+    periods = build_periods("2022-01-03", "2022-01-24", "weekly")
+    assert [p.label for p in periods] == ["2022-W01", "2022-W02", "2022-W03"]
+    assert periods[0].start == date(2022, 1, 3)
+    assert periods[0].end == date(2022, 1, 10)
+
+
+def test_build_periods_weekly_snaps_partial_start_to_monday():
+    # Starting mid-week (Thursday) should still snap back to that week's Monday,
+    # the same way a mid-month start snaps back to the 1st for "monthly".
+    periods = build_periods("2022-01-06", "2022-01-09", "weekly")
+    assert [p.label for p in periods] == ["2022-W01"]
+    assert periods[0].start == date(2022, 1, 3)
 
 
 def test_qa_flag_no_data():
@@ -184,6 +200,38 @@ def test_build_breakdown_row_unprefixed_stat_keys():
     assert row["sum_radiance"] == 900.0
     assert row["median_radiance"] == 1.5
     assert row["valid_pixel_count"] == 200
+
+
+def test_build_breakdown_row_attribute_fields_override_defaults():
+    # When attribute_fields is given, output uses exactly those columns instead
+    # of the hardcoded admin0/1/2 columns -- this is what lets --aoi-file users
+    # disambiguate same-named units (e.g. two municipios called the same thing
+    # in different states) by picking whichever parent field their data has.
+    props = {
+        "unit_name": "Independencia",
+        "ADM0_NAME": "Venezuela",
+        "ADM1_NAME": "Miranda",
+        "state_code": "MI",
+        "avg_rad_mean": 2.1,
+        "avg_rad_sum": 84.0,
+        "avg_rad_median": 1.9,
+        "avg_rad_count": 40,
+    }
+    row = build_breakdown_row(
+        "2024-01", "avg_rad", props, scene_count=1, attribute_fields=["ADM1_NAME", "state_code"]
+    )
+    assert row["ADM1_NAME"] == "Miranda"
+    assert row["state_code"] == "MI"
+    assert "admin0_name" not in row
+    assert "admin1_name" not in row
+    assert row["mean_radiance"] == 2.1
+
+
+def test_build_breakdown_row_attribute_fields_missing_property_is_none():
+    row = build_breakdown_row(
+        "2024-01", "avg_rad", {"unit_name": "X"}, scene_count=1, attribute_fields=["ADM1_NAME"]
+    )
+    assert row["ADM1_NAME"] is None
 
 
 def test_build_breakdown_row_no_data():

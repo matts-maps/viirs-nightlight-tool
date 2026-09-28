@@ -2,11 +2,14 @@
 
 A reusable command-line tool that extracts a VIIRS nighttime-lights radiance
 time series for any area of interest — a country, a sub-national unit, or a
-custom boundary you supply — over any date range and at daily, monthly, or
-annual frequency.
+custom boundary you supply — over any date range and at daily, weekly,
+monthly, or annual frequency.
 
 Built to be run by anyone, on any machine: it's plain Python with open-source
-dependencies, no ArcGIS/arcpy requirement, and no hardcoded paths.
+dependencies, no ArcGIS/arcpy requirement, and no hardcoded paths. If you'd
+rather be walked through the options than remember flags, run it with no
+arguments (or add `--wizard`) for an interactive prompt — see
+[Interactive mode](#interactive-mode-wizard) below.
 
 ## What it does
 
@@ -65,6 +68,22 @@ python nightlight_tool.py \
     --chart
 ```
 
+### Interactive mode (`--wizard`)
+
+If you don't want to look up flag names, run the tool with no arguments at
+all (or add `--wizard` to any invocation) and it will prompt you through each
+choice — AOI, granularity, attributes, date range, frequency, and output path
+— then run exactly as if you'd typed the equivalent flags:
+
+```bash
+python nightlight_tool.py
+# or
+python nightlight_tool.py --wizard
+```
+
+This is the same code path as the flag-based CLI underneath — the wizard just
+builds the flags for you, so anything documented below applies either way.
+
 Or by admin-unit name instead of a boundary file (looked up against
 Earth Engine's FAO GAUL admin boundaries, country → admin-1 → admin-2):
 
@@ -80,13 +99,15 @@ python nightlight_tool.py --aoi-name "Ukraine" \
 | `--aoi-file` | one of `--aoi-file` / `--aoi-name` | path to a GeoJSON/shapefile/etc. — for a specific sub-unit (e.g. one raion), get a proper boundary from a source like [fieldmaps.io](https://fieldmaps.io), [HDX COD](https://data.humdata.org/), or [GADM](https://gadm.org) |
 | `--aoi-name` | — | admin name to look up, e.g. `"Ukraine"`, or an admin-1/2 name |
 | `--start`, `--end` | yes | ISO dates, `--end` is exclusive |
-| `--freq` | yes | `daily`, `monthly`, or `annual` |
+| `--freq` | yes | `daily`, `weekly`, `monthly`, or `annual` |
 | `--out` | yes | output CSV path |
 | `--chart` | no | also write a PNG line chart next to the CSV (ignored with `--breakdown`, see below) |
 | `--ee-project` | no | your Earth Engine cloud project ID, if required (see step 2) |
 | `--breakdown` | no | `admin1` or `admin2` — output one row per sub-unit per period instead of one row per period (see below) |
 | `--unit-name-field` | no | required alongside `--breakdown` when using `--aoi-file` (see below) |
+| `--attributes` | no | comma-separated field/column names to include as extra columns in `--breakdown` output (see below) |
 | `--simplify-tolerance` | no | simplify `--aoi-file` geometries by this many degrees before sending to Earth Engine — only relevant to `--breakdown --aoi-file` with a detailed layer (see below) |
+| `--wizard` | no | run the interactive prompt instead of using flags (also runs automatically with no arguments) |
 
 ### Breaking a country down by admin unit
 
@@ -125,6 +146,39 @@ python nightlight_tool.py --aoi-file crimea_raions.geojson --unit-name-field rai
 every feature in the file is kept separate regardless of which admin level
 you name.)
 
+#### Choosing which attributes end up in the output: `--attributes`
+
+By default, `--breakdown` output includes `admin0_name`/`admin1_name`/
+`admin2_name` when using `--aoi-name` (GAUL), and just `unit_name` when using
+`--aoi-file`. That's not always enough — e.g. Venezuela has several municipios
+that share the same name across different states, so `unit_name` alone can't
+tell them apart in the CSV.
+
+`--attributes` lets you pick exactly which fields from the admin/boundary
+data become columns instead:
+
+```bash
+# GAUL: use GAUL's own property names
+python nightlight_tool.py --aoi-name "Venezuela" --breakdown admin2 \
+    --attributes ADM0_NAME,ADM1_NAME \
+    --start 2024-09-01 --end 2026-09-01 --freq monthly \
+    --out venezuela_admin2.csv --ee-project ee-masims
+
+# --aoi-file: use column names from your own file
+python nightlight_tool.py --aoi-file ven_admin2.geojson --unit-name-field adm2_name \
+    --attributes adm1_name,adm1_pcode --breakdown admin2 \
+    --start 2024-09-01 --end 2026-09-01 --freq monthly \
+    --out venezuela_admin2.csv --ee-project ee-masims --simplify-tolerance 0.001
+```
+
+When `--attributes` is given, it fully replaces the default columns — you get
+exactly the fields you named (plus `unit_name`), so include whatever parent
+name/code field disambiguates your units. With `--aoi-file`, an unknown
+column name fails fast with the list of columns actually in your file; with
+`--aoi-name`, an unrecognised GAUL property name just comes back blank rather
+than erroring (GAUL's property names vary slightly by asset — check a sample
+feature if a column you expect isn't showing up).
+
 #### Large/detailed boundary files: `--simplify-tolerance`
 
 Earth Engine rejects a client-side `FeatureCollection` (which is what
@@ -162,6 +216,14 @@ tiny units.
 - **monthly** (recommended default) uses NOAA's pre-composited, cloud-free
   monthly product (`VCMSLCFG`) — the most reliable option for a trend.
 - **annual** averages the monthly composites over each calendar year.
+- **weekly** mosaics NASA's gap-filled daily product (`VNP46A2`) over each
+  ISO calendar week (Monday–Sunday) — there's no native VIIRS weekly
+  composite, so this is built the same way `annual` is built from monthly
+  data, just from the daily product instead. Useful for tracking short-term
+  change (e.g. a blackout event) at a finer grain than monthly without the
+  full noise and call-count cost of `daily`. A period that starts mid-week is
+  snapped back to that week's Monday, the same way a mid-month `--start`
+  snaps back to the 1st for `monthly`.
 - **daily** uses NASA's gap-filled daily product (`VNP46A2`) with basic
   quality masking — more granular (useful for pinpointing a specific
   blackout night) but noisier, and much slower for long date ranges since
@@ -219,6 +281,14 @@ correctly, before spending an Earth Engine call on a real AOI.
 
 ## Roadmap
 
+Towards a tool anyone can pick up without reading this whole README first:
+
+- **Global-dataset AOI picker** — a country dropdown/lookup backed by a
+  bundled or fetched dataset (fieldmaps.io and/or the latest GAUL release),
+  so `--aoi-name` doesn't depend on knowing GAUL's exact naming.
+- **Geodatabase (`.gdb`) input** — `--aoi-file`/`--unit-name-field` currently
+  read via `geopandas`, which supports `.gdb`, but this hasn't been tested or
+  documented as a supported input format yet.
 - **Baseline/change detection** — flag a period as a % drop vs. a
   user-defined baseline (e.g. pre-war average), for spotting likely
   blackouts/damage rather than just reading a trend line by eye.
@@ -228,3 +298,9 @@ correctly, before spending an Earth Engine call on a real AOI.
 - **Clipped raster export** — an `--export-clipped-raster` style flag that
   also writes the reduced VIIRS image for an AOI as a small GeoTIFF, for
   visual sanity-checking of the mask/clip in a GIS.
+- **Chart support in `--breakdown` mode** — currently skipped there (one line
+  per unit isn't useful at admin1/2 scale); a per-unit small-multiples chart
+  or a "pick N units to chart" option would close this gap.
+
+Already delivered towards the "anyone can use it" goal: `--wizard` interactive
+mode, `weekly` frequency, and `--attributes` for choosing output columns.

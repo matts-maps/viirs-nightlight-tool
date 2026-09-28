@@ -43,7 +43,7 @@ from typing import Iterable, Optional
 # Pure logic — no `ee` import here, so this half is unit-testable offline.
 # ---------------------------------------------------------------------------
 
-VALID_FREQS = ("daily", "monthly", "annual")
+VALID_FREQS = ("daily", "weekly", "monthly", "annual")
 
 # VNP46A2 Mandatory_Quality_Flag values (per the product's QA band):
 #   0 = high-quality, persistent nighttime lights, main algorithm
@@ -102,6 +102,17 @@ def build_periods(start: str, end: str, freq: str) -> list[Period]:
             periods.append(Period(f"{cur.year:04d}-{cur.month:02d}", cur, nxt))
             cur = nxt
 
+    elif freq == "weekly":
+        # Snap to the Monday of the start date's ISO week, same spirit as
+        # monthly snapping to the 1st -- a partial first week is still
+        # reported as a full calendar week rather than a ragged stub.
+        cur = start_d - timedelta(days=start_d.weekday())
+        while cur < end_d:
+            nxt = cur + timedelta(days=7)
+            iso_year, iso_week, _ = cur.isocalendar()
+            periods.append(Period(f"{iso_year:04d}-W{iso_week:02d}", cur, nxt))
+            cur = nxt
+
     elif freq == "annual":
         cur = date(start_d.year, 1, 1)
         while cur < end_d:
@@ -128,27 +139,47 @@ def _get_stat(feature_properties: dict, band: str, stat: str):
 
 
 def build_breakdown_row(
-    period_label: str, band: str, feature_properties: dict, scene_count: int
+    period_label: str,
+    band: str,
+    feature_properties: dict,
+    scene_count: int,
+    attribute_fields: Optional[list[str]] = None,
 ) -> dict:
     """Pure function: turn one reduceRegions-output feature's properties into a row.
 
     `feature_properties` is a plain dict (as returned by ee's getInfo(), or a fake
     one in tests) — this function makes no Earth Engine calls itself, which is what
     keeps it unit-testable without an EE session.
+
+    `attribute_fields`, when given, names the exact properties/columns from the
+    admin/boundary data to carry into the output as their own columns (e.g.
+    ["ADM0_NAME", "ADM1_NAME"] for GAUL, or user-chosen column names from an
+    --aoi-file). This is how the caller picks what ends up in the CSV instead of
+    always getting the three hardcoded GAUL admin-name columns below, which stay
+    as the default for backward compatibility when no fields are requested.
     """
-    return {
+    row: dict = {
         "period": period_label,
         "unit_name": feature_properties.get("unit_name"),
-        "admin0_name": feature_properties.get("ADM0_NAME"),
-        "admin1_name": feature_properties.get("ADM1_NAME"),
-        "admin2_name": feature_properties.get("ADM2_NAME"),
-        "mean_radiance": _get_stat(feature_properties, band, "mean"),
-        "sum_radiance": _get_stat(feature_properties, band, "sum"),
-        "median_radiance": _get_stat(feature_properties, band, "median"),
-        "valid_pixel_count": _get_stat(feature_properties, band, "count"),
-        "scene_count": scene_count,
-        "qa_flag": qa_flag(scene_count, None),
     }
+    if attribute_fields:
+        for field in attribute_fields:
+            row[field] = feature_properties.get(field)
+    else:
+        row["admin0_name"] = feature_properties.get("ADM0_NAME")
+        row["admin1_name"] = feature_properties.get("ADM1_NAME")
+        row["admin2_name"] = feature_properties.get("ADM2_NAME")
+    row.update(
+        {
+            "mean_radiance": _get_stat(feature_properties, band, "mean"),
+            "sum_radiance": _get_stat(feature_properties, band, "sum"),
+            "median_radiance": _get_stat(feature_properties, band, "median"),
+            "valid_pixel_count": _get_stat(feature_properties, band, "count"),
+            "scene_count": scene_count,
+            "qa_flag": qa_flag(scene_count, None),
+        }
+    )
+    return row
 
 
 def qa_flag(scene_count: int, valid_pixel_fraction: Optional[float]) -> str:
@@ -311,7 +342,11 @@ def _get_period_image_and_scene_count(freq: str, period: Period):
         image = coll.mean() if freq == "annual" else coll.mosaic()
         return image, band, scene_count
 
-    # daily
+    # daily or weekly: both mosaic the gap-filled daily product over the
+    # period's date range (a single day for "daily", a calendar week for
+    # "weekly") -- there's no native VIIRS weekly composite product, so a
+    # week is built the same way "annual" is built from monthly images: by
+    # combining the finer-grained product over a wider window.
     band = "Gap_Filled_DNB_BRDF_Corrected_NTL"
     coll = (
         ee.ImageCollection("NASA/VIIRS/002/VNP46A2")
@@ -393,6 +428,7 @@ def resolve_breakdown_collection(
     breakdown: str,
     unit_name_field: Optional[str],
     simplify_tolerance: Optional[float] = None,
+    attribute_fields: Optional[list[str]] = None,
 ):
     """Return an ee.FeatureCollection of sub-units to break the analysis down by,
     each carrying a 'unit_name' property.
@@ -401,6 +437,13 @@ def resolve_breakdown_collection(
     country. --aoi-file + --breakdown: keeps every feature in the file separate
     (rather than dissolving them, like the single-AOI path does) and labels each
     from --unit-name-field.
+
+    `attribute_fields`, when given, are extra property/column names to carry
+    through onto each unit so they end up as columns in the output (see
+    build_breakdown_row). GAUL features already carry their admin-name/code
+    properties natively, so nothing extra is needed there; for --aoi-file the
+    requested columns are read from the boundary file and validated here, the
+    same way --unit-name-field already is.
     """
     import ee
 
@@ -435,19 +478,39 @@ def resolve_breakdown_collection(
             raise ValueError(
                 f"{unit_name_field!r} not found in {aoi_file} columns: {list(gdf.columns)}"
             )
-        features = [
-            ee.Feature(
-                ee.Geometry(simplify_geometry(row.geometry, simplify_tolerance).__geo_interface__),
-                {"unit_name": row[unit_name_field]},
+        if attribute_fields:
+            missing = [f for f in attribute_fields if f not in gdf.columns]
+            if missing:
+                raise ValueError(
+                    f"--attributes field(s) {missing} not found in {aoi_file} columns: "
+                    f"{list(gdf.columns)}"
+                )
+        features = []
+        for _, row in gdf.iterrows():
+            properties = {"unit_name": row[unit_name_field]}
+            if attribute_fields:
+                for field in attribute_fields:
+                    properties[field] = row[field]
+            features.append(
+                ee.Feature(
+                    ee.Geometry(
+                        simplify_geometry(row.geometry, simplify_tolerance).__geo_interface__
+                    ),
+                    properties,
+                )
             )
-            for _, row in gdf.iterrows()
-        ]
         return ee.FeatureCollection(features)
 
     raise ValueError("--breakdown needs either --aoi-name or --aoi-file (+ --unit-name-field)")
 
 
-def fetch_period_breakdown_stats(freq: str, fc, period: Period, scale: int = 500) -> list[dict]:
+def fetch_period_breakdown_stats(
+    freq: str,
+    fc,
+    period: Period,
+    scale: int = 500,
+    attribute_fields: Optional[list[str]] = None,
+) -> list[dict]:
     """Query Earth Engine for one period's zonal stats across every unit in `fc`
     in a single reduceRegions call, rather than one call per unit."""
     image, band, scene_count = _get_period_image_and_scene_count(freq, period)
@@ -455,7 +518,13 @@ def fetch_period_breakdown_stats(freq: str, fc, period: Period, scale: int = 500
     if image is None:
         unit_names = fc.aggregate_array("unit_name").getInfo()
         return [
-            build_breakdown_row(period.label, band, {"unit_name": name}, scene_count=0)
+            build_breakdown_row(
+                period.label,
+                band,
+                {"unit_name": name},
+                scene_count=0,
+                attribute_fields=attribute_fields,
+            )
             for name in unit_names
         ]
 
@@ -464,7 +533,9 @@ def fetch_period_breakdown_stats(freq: str, fc, period: Period, scale: int = 500
     )
     features = reduced.getInfo()["features"]
     return [
-        build_breakdown_row(period.label, band, f["properties"], scene_count)
+        build_breakdown_row(
+            period.label, band, f["properties"], scene_count, attribute_fields=attribute_fields
+        )
         for f in features
     ]
 
@@ -509,6 +580,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Property/column in --aoi-file to label each unit with, when using --breakdown with --aoi-file",
     )
     p.add_argument(
+        "--attributes",
+        default=None,
+        help=(
+            "Comma-separated list of extra property/column names from the admin data to "
+            "include as their own columns in --breakdown output. With --aoi-name these are "
+            "GAUL property names (e.g. ADM0_NAME,ADM1_NAME,ADM0_CODE); with --aoi-file these "
+            "are column names from your boundary file. If omitted, --aoi-name output defaults "
+            "to admin0_name/admin1_name/admin2_name and --aoi-file output has no extra columns "
+            "beyond unit_name -- use this to disambiguate units that share a name (e.g. two "
+            "municipios called the same thing in different states) by including their parent "
+            "unit's name/code."
+        ),
+    )
+    p.add_argument(
+        "--wizard",
+        action="store_true",
+        help=(
+            "Run an interactive prompt that walks through every option instead of passing "
+            "flags. Also runs automatically if the tool is started with no arguments at all."
+        ),
+    )
+    p.add_argument(
         "--simplify-tolerance",
         type=float,
         default=None,
@@ -523,16 +616,131 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _prompt_text(label: str, default: Optional[str] = None) -> str:
+    suffix = f" [{default}]" if default else ""
+    while True:
+        val = input(f"{label}{suffix}: ").strip()
+        if val:
+            return val
+        if default is not None:
+            return default
+        print("  (required -- please enter a value)")
+
+
+def _prompt_choice(label: str, options: list[str]) -> int:
+    print(f"\n{label}:")
+    for i, opt in enumerate(options, 1):
+        print(f"  {i}. {opt}")
+    while True:
+        val = input(f"Choose 1-{len(options)}: ").strip()
+        if val.isdigit() and 1 <= int(val) <= len(options):
+            return int(val) - 1
+        print(f"  Please enter a number from 1 to {len(options)}.")
+
+
+def _prompt_yes_no(label: str, default: bool = True) -> bool:
+    suffix = "[Y/n]" if default else "[y/N]"
+    val = input(f"{label} {suffix}: ").strip().lower()
+    if not val:
+        return default
+    return val.startswith("y")
+
+
+def run_wizard() -> list[str]:
+    """Interactively ask for each option and return the equivalent argv list.
+
+    This deliberately doesn't duplicate any validation or execution logic --
+    it just builds the same flags a command-line invocation would pass, which
+    then go through the normal build_arg_parser().parse_args() + main() path
+    below. That keeps there being exactly one code path that actually runs
+    the tool, whether it was configured via flags or via this wizard.
+    """
+    print("VIIRS Nightlight Tool -- interactive setup")
+    print("(Ctrl+C at any point to cancel)\n")
+
+    argv: list[str] = []
+
+    aoi_choice = _prompt_choice(
+        "Area of interest",
+        [
+            "Look up a country or admin unit by name (FAO GAUL)",
+            "Supply my own boundary file (shapefile, GeoJSON, or geodatabase)",
+        ],
+    )
+    if aoi_choice == 0:
+        argv += ["--aoi-name", _prompt_text("Country or admin-unit name (e.g. 'Ukraine')")]
+    else:
+        argv += ["--aoi-file", _prompt_text("Path to your boundary file")]
+
+    breakdown_choice = _prompt_choice(
+        "Granularity",
+        [
+            "Whole AOI as a single unit (one time series)",
+            "Break down by admin1 (e.g. oblast/governorate/state)",
+            "Break down by admin2 (e.g. raion/district/municipio)",
+        ],
+    )
+    if breakdown_choice != 0:
+        argv += ["--breakdown", "admin1" if breakdown_choice == 1 else "admin2"]
+
+        if aoi_choice == 1:
+            argv += [
+                "--unit-name-field",
+                _prompt_text("Column/property in your file that names each unit"),
+            ]
+
+        attrs = _prompt_text(
+            "Extra attribute columns to include, comma-separated "
+            "(blank for defaults -- see README)",
+            default="",
+        )
+        if attrs.strip():
+            argv += ["--attributes", attrs.strip()]
+
+    argv += ["--start", _prompt_text("Start date (YYYY-MM-DD, inclusive)")]
+    argv += ["--end", _prompt_text("End date (YYYY-MM-DD, exclusive)")]
+
+    freq_options = list(VALID_FREQS)
+    freq_choice = _prompt_choice("Frequency", freq_options)
+    argv += ["--freq", freq_options[freq_choice]]
+
+    argv += ["--out", _prompt_text("Output CSV path", default="out/nightlights.csv")]
+
+    if breakdown_choice == 0:
+        if _prompt_yes_no("Also write a chart PNG next to the CSV?", default=True):
+            argv.append("--chart")
+
+    ee_project = _prompt_text(
+        "Earth Engine cloud project ID (blank if your account doesn't need one)", default=""
+    )
+    if ee_project.strip():
+        argv += ["--ee-project", ee_project.strip()]
+
+    print()
+    return argv
+
+
 def main(argv: Optional[list[str]] = None) -> int:
+    raw_argv = sys.argv[1:] if argv is None else argv
+    if not raw_argv or "--wizard" in raw_argv:
+        try:
+            argv = run_wizard()
+        except (KeyboardInterrupt, EOFError):
+            print("\nCancelled.", file=sys.stderr)
+            return 1
+
     args = build_arg_parser().parse_args(argv)
+    attribute_fields = (
+        [f.strip() for f in args.attributes.split(",") if f.strip()] if args.attributes else None
+    )
 
     periods = build_periods(args.start, args.end, args.freq)
     if not periods:
         print("No periods to process — check --start/--end/--freq.", file=sys.stderr)
         return 1
-    if args.freq == "daily" and len(periods) > 366:
+    if args.freq in ("daily", "weekly") and len(periods) > 366:
         print(
-            f"Warning: {len(periods)} daily periods requested — this will make "
+            f"Warning: {len(periods)} {args.freq} periods requested — this will make "
             f"{len(periods)} separate Earth Engine calls and may be slow.",
             file=sys.stderr,
         )
@@ -562,12 +770,17 @@ def main(argv: Optional[list[str]] = None) -> int:
             args.breakdown,
             args.unit_name_field,
             simplify_tolerance=args.simplify_tolerance,
+            attribute_fields=attribute_fields,
         )
         unit_count = fc.size().getInfo()
         print(f"Breaking down into {unit_count} {args.breakdown} units.", file=sys.stderr)
         for i, period in enumerate(periods, 1):
             print(f"[{i}/{len(periods)}] {period.label} ...", file=sys.stderr)
-            rows.extend(fetch_period_breakdown_stats(args.freq, fc, period))
+            rows.extend(
+                fetch_period_breakdown_stats(
+                    args.freq, fc, period, attribute_fields=attribute_fields
+                )
+            )
     else:
         aoi_geom = resolve_aoi_geometry(args.aoi_file, args.aoi_name)
         for i, period in enumerate(periods, 1):
