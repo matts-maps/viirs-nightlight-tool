@@ -167,8 +167,6 @@ the exact GAUL name instead.
 | `--freq` | yes | `daily`, `weekly`, `monthly`, or `annual` |
 | `--out` | yes | output CSV path |
 | `--geo-out` | no | optional spatial output path (`.geojson` or `.shp`), joined to the boundary geometry by the unit's unique ID/pcode — one file per period plus one combined file with every period (see below) |
-| `--include-change` | no | add change-vs-previous-period columns to the CSV and `--geo-out` (see below) |
-| `--baseline-period` | no | add change-vs-a-fixed-baseline-period columns to the CSV and `--geo-out` — a date or a period label, e.g. `--baseline-period 2021-06-15` (see below) |
 | `--chart` | no | also write a PNG chart next to the CSV — one line chart for a single AOI, or a small-multiples grid (one mini chart per unit) with `--breakdown` (see below) |
 | `--chart-units` | no | comma-separated exact values from the output's unit-name column to chart, when using `--chart` with `--breakdown` (see below) |
 | `--ee-project` | no | your Earth Engine cloud project ID, if required (see step 2) |
@@ -392,63 +390,6 @@ name), `--geo-out ....shp` truncates and de-duplicates them automatically
 (appending `_2`, `_3`, etc. on a collision) and prints a warning listing
 exactly which names got renamed to what — GeoJSON output isn't affected by
 this limit.
-
-#### Tracking change over time: `--include-change` / `--baseline-period`
-
-Two independent flags add extra columns for `mean_radiance`, `sum_radiance`,
-and `median_radiance` — not `valid_pixel_count`/`scene_count`, which aren't
-meaningful to diff. Both land in the CSV and, if you're also using
-`--geo-out`, in the per-period and combined spatial files too, since it's
-the same row shape everywhere.
-
-- **`--include-change`** adds `<stat>_change_abs` and `<stat>_change_pct`,
-  comparing each row to the row immediately before it in its own series —
-  the previous period for that same unit, if you're using `--breakdown`, or
-  the previous period in the whole-AOI series otherwise. The first period in
-  each series has nothing to diff against, so both columns are blank there.
-
-- **`--baseline-period VALUE`** adds `<stat>_vs_baseline_abs` and
-  `<stat>_vs_baseline_pct`, comparing every row to one fixed reference
-  period instead — useful for something like "% change vs a pre-war
-  baseline" that doesn't shift as you re-run the tool over new date ranges.
-  Give it as **a plain date** (`YYYY-MM-DD`, like `--start`/`--end`) — the
-  tool figures out which period that date falls in for whatever `--freq`
-  is (e.g. `2021-06-15` with `--freq monthly` resolves to `2021-06`) — or,
-  if you already know the exact period-label format, that works directly
-  too: `2021-01-15` for daily, `2021-W05` for weekly, `2021-01` for
-  monthly, `2021` for annual. Either way, it doesn't need to fall inside
-  `--start`/`--end` — the tool fetches it as one extra period, the same
-  way as any other. In the GUI, this is a calendar date picker, same as
-  Start/End date.
-
-You can use either flag alone, or both together:
-
-```bash
-python nightlight_tool.py --aoi-file crimea_raions.geojson \
-    --unit-name-field raion_name --unit-id-field raion_pcode \
-    --start 2023-01-01 --end 2026-09-01 --freq monthly \
-    --out crimea_by_raion.csv --breakdown admin2 --ee-project ee-masims \
-    --include-change --baseline-period 2021-06
-```
-
-A `_pct` column is blank (not a divide-by-zero error) whenever the value
-being compared against is `0` — percent change from zero is undefined.
-
-**Treat `_abs` as the headline number, `_pct` as noisy, especially near
-zero.** VIIRS radiance sits near zero across a lot of area/time (a quiet
-rural district on an ordinary night), and percent change gets wild there —
-a tiny, meaningless absolute change against a near-zero denominator can
-read as a huge percentage even though nothing real happened, while the same
-absolute change against a bright unit barely moves the percentage at all.
-This isn't hypothetical: an earlier raster-based change layer built for
-this same Crimea/Ukraine analysis hit a 99.9th-percentile percent-change of
-17,349% (max 4.75 million percent) driven entirely by near-zero-radiance
-pixels, and one rayon's mean *absolute* change was slightly negative
-(−0.10 nW/cm²/sr — essentially flat) while its mean *percent* change read
-+157%, purely from averaging ratios with near-zero denominators. Lead with
-`_change_abs`/`_vs_baseline_abs` when deciding whether something real
-happened; use the `_pct` columns as a secondary check, and be skeptical of
-a large `_pct` value paired with a small `_abs` value.
 
 ### Choosing a frequency
 
