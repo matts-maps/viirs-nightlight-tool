@@ -1,0 +1,24 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "toy_bbox_sevastopol_area",
+        "note": "Illustrative bounding box only, for testing the tool end-to-end. NOT an authoritative or political boundary. For real AOIs use a proper source (e.g. fieldmaps.io, HDX Common Operational Datasets, or GADM)."
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [33.35, 44.55],
+            [33.75, 44.55],
+            [33.75, 44.75],
+            [33.35, 44.75],
+            [33.35, 44.55]
+          ]
+        ]
+      }
+    }
+  ]
+}
