@@ -254,46 +254,77 @@ def write_csv(rows: Iterable[dict], out_path: Path, fieldnames: Optional[list[st
 DEFAULT_MAX_BREAKDOWN_CHART_PANELS = 30
 
 
+def _chart_key(row: dict):
+    """Grouping key for one row's unit in a --breakdown chart.
+
+    unit_name alone isn't a safe key -- it's only meant to be human-readable
+    and two different units (e.g. two admin3 units in different admin2s)
+    can share a name. When the row carries a unit_id, that's used instead;
+    only rows with no unit_id at all (older runs, or --aoi-file without
+    --unit-id-field) fall back to grouping by unit_name as before.
+    """
+    uid = row.get("unit_id")
+    if uid not in (None, ""):
+        return uid
+    return row.get("unit_name")
+
+
 def select_breakdown_chart_units(
     rows: list[dict],
     unit_filter: Optional[list[str]] = None,
     max_panels: int = DEFAULT_MAX_BREAKDOWN_CHART_PANELS,
-) -> list[str]:
+) -> list:
     """Pure function: decide which units a --breakdown chart should draw one
-    panel for, and in what order.
+    panel for, and in what order. Returns a list of chart keys (see
+    _chart_key) -- plain unit_name strings when no unit_id is present, so
+    this is a drop-in superset of the old name-only behaviour.
 
     With `unit_filter` given (exact unit_name values, as the user typed them),
-    returns just those, in the order given -- deliberate selection needs no
-    cap. Without a filter, returns every unit that appears in `rows`, in
-    first-seen order, unless that's more than `max_panels`, in which case it
-    truncates and the caller is expected to warn (a chart with hundreds of
-    tiny panels isn't useful, and the fix is to either narrow with
-    --chart-units or just pivot the CSV yourself for a full per-unit view).
+    returns every distinct unit belonging to a matching name, grouped by name
+    in the order given -- if that name turns out to belong to more than one
+    unit (names collide), all of them are included rather than merged into
+    one panel -- deliberate selection needs no cap. Without a filter, returns
+    every unit that appears in `rows`, in first-seen order, unless that's
+    more than `max_panels`, in which case it truncates and the caller is
+    expected to warn (a chart with hundreds of tiny panels isn't useful, and
+    the fix is to either narrow with --chart-units or just pivot the CSV
+    yourself for a full per-unit view).
     """
-    seen: list[str] = []
-    seen_set = set()
+    keys_by_name: dict[str, list] = {}
+    seen_keys = set()
+    order: list = []
     for row in rows:
-        name = row.get("unit_name")
-        if name is not None and name not in seen_set:
-            seen.append(name)
-            seen_set.add(name)
+        key = _chart_key(row)
+        if key is None:
+            continue
+        if key not in seen_keys:
+            seen_keys.add(key)
+            order.append(key)
+            keys_by_name.setdefault(row.get("unit_name"), []).append(key)
 
     if unit_filter:
-        return [name for name in unit_filter if name in seen_set]
+        result = []
+        for name in unit_filter:
+            result.extend(keys_by_name.get(name, []))
+        return result
 
-    return seen[:max_panels]
+    return order[:max_panels]
 
 
 def write_breakdown_chart(
     rows: list[dict],
     chart_path: Path,
-    units: list[str],
+    units: list,
     value_field: str = "mean_radiance",
 ) -> None:
     """Write a small-multiples PNG: one mini line chart per unit in `units`,
     each showing `value_field` over `period`. Companion to write_chart() for
     --breakdown output, where a single shared chart with one line per unit
     isn't legible once there are more than a handful of units.
+
+    `units` is a list of chart keys as returned by select_breakdown_chart_units
+    (unit_id when available, else unit_name) -- rows are grouped by that same
+    key so units sharing a name never get merged into one panel.
     """
     import math
 
@@ -304,11 +335,16 @@ def write_breakdown_chart(
     if not units:
         raise ValueError("no units to chart")
 
-    by_unit: dict[str, list[dict]] = {u: [] for u in units}
+    by_unit: dict = {u: [] for u in units}
+    unit_titles: dict = {}
     for row in rows:
-        name = row.get("unit_name")
-        if name in by_unit:
-            by_unit[name].append(row)
+        key = _chart_key(row)
+        if key in by_unit:
+            by_unit[key].append(row)
+            if key not in unit_titles:
+                name = row.get("unit_name")
+                uid = row.get("unit_id")
+                unit_titles[key] = f"{name} ({uid})" if uid not in (None, "") else str(name)
 
     n = len(units)
     ncols = min(4, n)
@@ -321,7 +357,7 @@ def write_breakdown_chart(
         labels = [r["period"] for r in unit_rows]
         values = [r.get(value_field) for r in unit_rows]
         ax.plot(labels, values, marker="o", linewidth=1.2, markersize=3)
-        ax.set_title(str(unit), fontsize=9)
+        ax.set_title(unit_titles.get(unit, str(unit)), fontsize=9)
         ax.tick_params(axis="x", rotation=60, labelsize=7)
         ax.tick_params(axis="y", labelsize=7)
         for flag_row in unit_rows:
@@ -732,16 +768,37 @@ def fetch_period_breakdown_stats(
             unit_ids = []
         if len(unit_ids) != len(unit_names):
             unit_ids = [None] * len(unit_names)
-        return [
-            build_breakdown_row(
-                period.label,
-                band,
-                {"unit_name": name, "unit_id": uid},
-                scene_count=0,
-                attribute_fields=attribute_fields,
+
+        # Attribute columns (e.g. admin0_name, admin0_pcode) live on the same
+        # features -- without pulling them here too, any period that falls into
+        # this no-image branch (most often the most recent month, before that
+        # month's VIIRS composite has been published) would silently come back
+        # with every --attributes column blank instead of just the stats.
+        attribute_values: dict[str, list] = {}
+        for field in attribute_fields or []:
+            try:
+                values = fc.aggregate_array(field).getInfo()
+            except Exception:  # noqa: BLE001 -- field may not exist on this collection
+                values = []
+            if len(values) != len(unit_names):
+                values = [None] * len(unit_names)
+            attribute_values[field] = values
+
+        rows = []
+        for i, (name, uid) in enumerate(zip(unit_names, unit_ids)):
+            feature_properties = {"unit_name": name, "unit_id": uid}
+            for field, values in attribute_values.items():
+                feature_properties[field] = values[i]
+            rows.append(
+                build_breakdown_row(
+                    period.label,
+                    band,
+                    feature_properties,
+                    scene_count=0,
+                    attribute_fields=attribute_fields,
+                )
             )
-            for name, uid in zip(unit_names, unit_ids)
-        ]
+        return rows
 
     reduced = image.select(band).reduceRegions(
         collection=fc, reducer=_combined_reducer(), scale=scale, tileScale=4

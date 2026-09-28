@@ -424,6 +424,100 @@ def test_write_csv_rejects_empty(tmp_path):
         raise AssertionError("expected ValueError for empty rows")
 
 
+class _FakeAggregation:
+    def __init__(self, values):
+        self._values = values
+
+    def getInfo(self):
+        return self._values
+
+
+class _FakeFeatureCollection:
+    """Stand-in for an ee.FeatureCollection: just enough for
+    fetch_period_breakdown_stats' no-image branch to aggregate columns off
+    of, without needing a real Earth Engine session."""
+
+    def __init__(self, columns: dict):
+        self._columns = columns
+
+    def aggregate_array(self, field):
+        if field not in self._columns:
+            raise KeyError(field)
+        return _FakeAggregation(self._columns[field])
+
+
+def test_fetch_period_breakdown_stats_no_image_still_carries_attribute_fields():
+    # Regression test: when Earth Engine has no VIIRS composite yet for a
+    # period (e.g. the most recent month, before it's been published), the
+    # no-image branch used to only pull unit_name/unit_id off the feature
+    # collection -- every --attributes column (admin0_name, admin0_pcode,
+    # etc.) silently came back None for that period's rows instead of being
+    # carried through like every other period.
+    import types
+
+    import nightlight_tool as nt
+
+    fc = _FakeFeatureCollection(
+        {
+            "unit_name": ["Independencia", "Sucre"],
+            "unit_id": ["VE1301", "VE1302"],
+            "adm0_name": ["Venezuela", "Venezuela"],
+            "adm0_pcode": ["VE", "VE"],
+        }
+    )
+    period = nt.build_periods("2026-08-01", "2026-09-01", "monthly")[0]
+
+    original = nt._get_period_image_and_scene_count
+    nt._get_period_image_and_scene_count = lambda freq, period: (None, "avg_rad", 0)
+    try:
+        rows = nt.fetch_period_breakdown_stats(
+            "monthly", fc, period, attribute_fields=["adm0_name", "adm0_pcode"]
+        )
+    finally:
+        nt._get_period_image_and_scene_count = original
+
+    assert len(rows) == 2
+    assert [r["unit_name"] for r in rows] == ["Independencia", "Sucre"]
+    assert [r["unit_id"] for r in rows] == ["VE1301", "VE1302"]
+    assert [r["adm0_name"] for r in rows] == ["Venezuela", "Venezuela"]
+    assert [r["adm0_pcode"] for r in rows] == ["VE", "VE"]
+    assert all(r["qa_flag"] == "no_data" for r in rows)
+
+
+def test_select_breakdown_chart_units_dedupes_by_unit_id_not_name():
+    # Two different units sharing a unit_name (common at admin3 -- village/
+    # ward names repeat across different districts) must stay two distinct
+    # chart panels, not collapse into one.
+    rows = [
+        {"unit_name": "San Jose", "unit_id": "A1", "period": "2026-01"},
+        {"unit_name": "San Jose", "unit_id": "A2", "period": "2026-01"},
+        {"unit_name": "Miraflores", "unit_id": "A3", "period": "2026-01"},
+    ]
+    units = select_breakdown_chart_units(rows)
+    assert units == ["A1", "A2", "A3"]
+
+
+def test_select_breakdown_chart_units_filter_by_name_returns_all_matching_ids():
+    # --chart-units still takes unit_name values, but when a name is shared
+    # by several distinct units, all of them should be selected rather than
+    # arbitrarily picking (or merging) just one.
+    rows = [
+        {"unit_name": "San Jose", "unit_id": "A1", "period": "2026-01"},
+        {"unit_name": "San Jose", "unit_id": "A2", "period": "2026-01"},
+        {"unit_name": "Miraflores", "unit_id": "A3", "period": "2026-01"},
+    ]
+    units = select_breakdown_chart_units(rows, unit_filter=["San Jose"])
+    assert units == ["A1", "A2"]
+
+
+def test_select_breakdown_chart_units_falls_back_to_name_without_unit_id():
+    # No unit_id at all (older runs, or --aoi-file without --unit-id-field)
+    # -- behaviour is unchanged from before: group/dedupe by name.
+    rows = [{"unit_name": name, "period": "2022-01"} for name in ["Kyiv", "Odesa", "Kyiv"]]
+    units = select_breakdown_chart_units(rows)
+    assert units == ["Kyiv", "Odesa"]
+
+
 if __name__ == "__main__":
     # Allow `python tests/test_nightlight_tool.py` without pytest installed.
     import inspect
