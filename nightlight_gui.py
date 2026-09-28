@@ -87,6 +87,12 @@ class NightlightGUI:
         self._log_queue: "queue.Queue[str]" = queue.Queue()
         self._worker: Optional[threading.Thread] = None
         self._poll_job: Optional[str] = None
+        # Populated by _populate_field_widgets(); initialized empty here so
+        # _refresh_attribute_checkbox_states() has something to iterate
+        # over even before any columns have been loaded (it's reached via
+        # _on_aoi_source_change() right after _build_widgets(), below).
+        self._attribute_vars: dict[str, tk.BooleanVar] = {}
+        self._attribute_checkboxes: dict[str, tk.Checkbutton] = {}
 
         self._build_widgets()
         self._on_aoi_source_change()
@@ -188,6 +194,16 @@ class NightlightGUI:
         )
         self.unit_id_combo.grid(row=row, column=1, sticky="w", **pad)
         row += 1
+
+        # Whichever field is picked as the unit name/ID shouldn't also be
+        # tickable as an extra attribute -- it would land in the CSV twice
+        # (once under its own name from the unit-name/ID rename, once again
+        # as an attribute column of the same name). Refresh the checkbox
+        # panel on every edit to either field, not just a dropdown pick --
+        # both combos stay typeable (see _on_granularity_change), so a
+        # typed value needs to grey things out too.
+        self.unit_name_field.trace_add("write", lambda *_: self._refresh_attribute_checkbox_states())
+        self.unit_id_field.trace_add("write", lambda *_: self._refresh_attribute_checkbox_states())
 
         ttk.Label(frm, text="Extra attribute columns\n(tick any you want)").grid(
             row=row, column=0, sticky="nw", **pad
@@ -328,7 +344,7 @@ class NightlightGUI:
         breakdown_on = bool(level)
         is_file = self.aoi_source.get() == "file"
 
-        self._set_attribute_checkboxes_state(breakdown_on)
+        self._refresh_attribute_checkbox_states()
         # "Load available columns" is only needed for the GAUL name/ISO3
         # path -- picking a boundary file already auto-loads its columns
         # (see _on_browse_aoi_file), so the button would just be a
@@ -432,6 +448,7 @@ class NightlightGUI:
         for child in self.attributes_inner.winfo_children():
             child.destroy()
         self._attribute_vars = {}
+        self._attribute_checkboxes: dict[str, tk.Checkbutton] = {}
         for f in fields:
             var = tk.BooleanVar(value=False)
             cb = tk.Checkbutton(
@@ -445,14 +462,31 @@ class NightlightGUI:
             )
             cb.pack(anchor="w", fill="x")
             self._attribute_vars[f] = var
+            self._attribute_checkboxes[f] = cb
             self._bind_mousewheel(cb)
-        self._set_attribute_checkboxes_state(bool(self.breakdown_level()))
+        self._refresh_attribute_checkbox_states()
         self.attributes_canvas.configure(scrollregion=self.attributes_canvas.bbox("all"))
 
-    def _set_attribute_checkboxes_state(self, enabled: bool) -> None:
-        state = "normal" if enabled else "disabled"
-        for child in self.attributes_inner.winfo_children():
-            child.configure(state=state)
+    def _refresh_attribute_checkbox_states(self) -> None:
+        """Enable/disable every extra-attribute checkbox: off entirely when
+        no breakdown level is chosen (same as before), and individually
+        greyed out -- and un-ticked if it was ticked -- for whichever field
+        is currently the Unit name or Unique ID column. Picking the same
+        field for both a unit column and an attribute would otherwise write
+        it into the CSV twice under a colliding header (the unit-name/ID
+        columns get renamed to the field's own name -- see
+        rename_unit_columns() in nightlight_tool.py). Runs on every
+        checkbox rebuild and on every edit (typed or picked) to either unit
+        field, since both combos stay typeable.
+        """
+        breakdown_on = bool(self.breakdown_level())
+        reserved = {self.unit_name_field.get().strip(), self.unit_id_field.get().strip()} - {""}
+        for name, cb in self._attribute_checkboxes.items():
+            if name in reserved:
+                self._attribute_vars[name].set(False)
+                cb.configure(state="disabled")
+            else:
+                cb.configure(state="normal" if breakdown_on else "disabled")
 
     def _bind_mousewheel(self, widget: tk.Widget) -> None:
         """Let the mouse wheel scroll the attribute checkbox panel while the
