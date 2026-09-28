@@ -166,8 +166,7 @@ the exact GAUL name instead.
 | `--start`, `--end` | yes | ISO dates, `--end` is exclusive |
 | `--freq` | yes | `daily`, `weekly`, `monthly`, or `annual` |
 | `--out` | yes | output CSV path |
-| `--geo-out` | no | optional spatial output path (`.geojson` or `.shp`), joined to the boundary geometry by the unit's unique ID/pcode (see below) |
-| `--geo-out-per-period` | no | requires `--geo-out` — also write one extra spatial file per period (see below) |
+| `--geo-out` | no | optional spatial output path (`.geojson` or `.shp`), one file per period, joined to the boundary geometry by the unit's unique ID/pcode (see below) |
 | `--chart` | no | also write a PNG chart next to the CSV — one line chart for a single AOI, or a small-multiples grid (one mini chart per unit) with `--breakdown` (see below) |
 | `--chart-units` | no | comma-separated exact values from the output's unit-name column to chart, when using `--chart` with `--breakdown` (see below) |
 | `--ee-project` | no | your Earth Engine cloud project ID, if required (see step 2) |
@@ -357,21 +356,24 @@ falling back to the unit-name column otherwise — the same matching logic
 that row is dropped from the spatial output and a warning is printed (the
 CSV still has it).
 
-This writes **two** files, both carrying the exact same columns as the CSV:
+This writes **one spatial file per period** — one per frequency step
+(month/week/year/day, whichever `--freq` is) — named with the period
+appended to the path you gave: `crimea_by_raion_2021-01.geojson`,
+`crimea_by_raion_2021-02.geojson`, and so on. Each file has one feature per
+unit, with:
 
-- The path you gave (`crimea_by_raion.geojson`) — **wide** format, one
-  feature per unit, with every period's stats as their own block of columns
-  (e.g. `mean_radiance_2021-01`, `mean_radiance_2021-02`, ...). Good for
-  symbolizing a single period, or for a "change over time" choropleth series
-  in a GIS.
-- The same path with `_by_period` inserted before the extension
-  (`crimea_by_raion_by_period.geojson`) — **long** format, one feature per
-  unit *per period*, same shape as the CSV rows plus geometry. Good for
-  animating through time or filtering to one period at a time in a GIS.
+- the unit's name/ID columns (and any `--attributes` columns) you selected, and
+- `mean_radiance`, `sum_radiance`, `median_radiance`, `valid_pixel_count`,
+  `scene_count`, `qa_flag`
+
+Splitting by period this way (rather than one combined file with every
+period bundled in) makes it straightforward to step through or animate
+months one at a time in a GIS, or load a single period's file to symbolize
+on its own. The period itself isn't repeated as a column, since it's
+already at the end of every filename.
 
 `--geo-out` works with or without `--breakdown` — without it, there's just
-one "unit" (the whole AOI), so the wide file has a single feature and the
-long file has one feature per period.
+one "unit" (the whole AOI), so each period's file has a single feature.
 
 Shapefile field names are capped at 10 characters by the format itself. If
 any of your column names are longer (or two get truncated down to the same
@@ -379,31 +381,6 @@ name), `--geo-out ....shp` truncates and de-duplicates them automatically
 (appending `_2`, `_3`, etc. on a collision) and prints a warning listing
 exactly which names got renamed to what — GeoJSON output isn't affected by
 this limit.
-
-#### One spatial file per period: `--geo-out-per-period`
-
-The wide file's per-period columns (`mean_radiance_2021-01`, ...) work fine
-for a "change over time" symbology, but stepping through or animating months
-one at a time in a GIS is easier with a separate file per period, each using
-plain column names. Add `--geo-out-per-period` alongside `--geo-out`:
-
-```bash
-python nightlight_tool.py --aoi-file crimea_raions.geojson \
-    --unit-name-field raion_name --unit-id-field raion_pcode \
-    --start 2021-01-01 --end 2023-01-01 --freq monthly \
-    --out crimea_by_raion.csv --breakdown admin2 --ee-project ee-masims \
-    --geo-out crimea_by_raion.geojson --geo-out-per-period
-```
-
-This writes one extra file per period, named with the period appended to
-the `--geo-out` stem (`crimea_by_raion_2021-01.geojson`,
-`crimea_by_raion_2021-02.geojson`, ...), alongside — not instead of — the
-usual wide and `_by_period` long files. Each per-period file has one
-feature per unit, with that period's stats as plain columns (e.g.
-`mean_radiance`, not `mean_radiance_2021-01`), since every row in a given
-file already shares that one period. `--geo-out-per-period` has no effect
-without `--geo-out` (you'll get a warning, not an error, if you pass it
-alone).
 
 ### Choosing a frequency
 

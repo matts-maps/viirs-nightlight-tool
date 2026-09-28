@@ -20,11 +20,9 @@ from nightlight_tool import (
     build_arg_parser,
     build_argv_from_form,
     build_breakdown_row,
-    build_geo_rows,
     build_periods,
     gaul_unit_name_id_fields,
     list_file_fields,
-    pivot_rows_wide,
     qa_flag,
     rename_unit_columns,
     resolve_breakdown_collection,
@@ -35,7 +33,6 @@ from nightlight_tool import (
     split_rows_by_period,
     summarize_pixels,
     write_csv,
-    write_geo_outputs,
     write_geo_outputs_per_period,
 )
 
@@ -757,41 +754,6 @@ def test_build_argv_from_form_geo_out_omitted_when_blank():
     assert args.geo_out is None
 
 
-def test_build_argv_from_form_geo_out_per_period_included_when_checked():
-    argv = build_argv_from_form(
-        {
-            "aoi_source": "iso3",
-            "aoi_iso3": "UKR",
-            "start": "2026-01-01",
-            "end": "2026-02-01",
-            "freq": "monthly",
-            "out": "o.csv",
-            "geo_out": "o.geojson",
-            "geo_out_per_period": True,
-        }
-    )
-    args = build_arg_parser().parse_args(argv)
-    assert args.geo_out_per_period is True
-
-
-def test_build_argv_from_form_geo_out_per_period_ignored_without_geo_out():
-    # geo_out_per_period without a geo_out path is meaningless (and --geo-out
-    # -per-period alone would fail argparse validation at runtime anyway) --
-    # build_argv_from_form should never emit the flag with no --geo-out.
-    argv = build_argv_from_form(
-        {
-            "aoi_source": "iso3",
-            "aoi_iso3": "UKR",
-            "start": "2026-01-01",
-            "end": "2026-02-01",
-            "freq": "monthly",
-            "out": "o.csv",
-            "geo_out_per_period": True,
-        }
-    )
-    assert "--geo-out-per-period" not in argv
-
-
 # ---------------------------------------------------------------------------
 # rename_unit_columns / gaul_unit_name_id_fields -- output columns named
 # after the field that actually identifies each unit, not a generic label.
@@ -853,47 +815,8 @@ def test_gaul_unit_name_id_fields_rejects_admin3():
         raise AssertionError("expected ValueError for admin3 (GAUL only goes to admin2)")
 
 
-# --- pivot_rows_wide / attach_geometry / shapefile_safe_field_names / -----
-# --- build_geo_rows / write_geo_outputs (--geo-out) -----------------------
-
-def _breakdown_rows_for_pivot():
-    return [
-        {"period": "2026-01", "adm2_name": "A", "adm2_pcode": "P1", "mean_radiance": 1.0, "qa_flag": "ok"},
-        {"period": "2026-02", "adm2_name": "A", "adm2_pcode": "P1", "mean_radiance": 2.0, "qa_flag": "ok"},
-        {"period": "2026-01", "adm2_name": "B", "adm2_pcode": "P2", "mean_radiance": 3.0, "qa_flag": "ok"},
-        {"period": "2026-02", "adm2_name": "B", "adm2_pcode": "P2", "mean_radiance": 4.0, "qa_flag": "no_data"},
-    ]
-
-
-def test_pivot_rows_wide_empty_rows():
-    assert pivot_rows_wide([], id_cols=["adm2_pcode"]) == []
-
-
-def test_pivot_rows_wide_one_row_per_unit_in_first_seen_order():
-    wide = pivot_rows_wide(_breakdown_rows_for_pivot(), id_cols=["adm2_name", "adm2_pcode"])
-    assert [r["adm2_pcode"] for r in wide] == ["P1", "P2"]
-
-
-def test_pivot_rows_wide_splits_each_value_column_per_period():
-    wide = pivot_rows_wide(_breakdown_rows_for_pivot(), id_cols=["adm2_name", "adm2_pcode"])
-    unit_a = wide[0]
-    assert unit_a["mean_radiance_2026-01"] == 1.0
-    assert unit_a["mean_radiance_2026-02"] == 2.0
-    assert unit_a["qa_flag_2026-01"] == "ok"
-    assert "period" not in unit_a  # the pivot column itself isn't carried through
-
-
-def test_pivot_rows_wide_empty_id_cols_collapses_to_one_row():
-    # The whole-AOI (non-breakdown) shape: no identity columns at all, so
-    # every period's row belongs to the same single implicit "unit".
-    rows = [
-        {"period": "2026-01", "mean_radiance": 1.0},
-        {"period": "2026-02", "mean_radiance": 2.0},
-    ]
-    wide = pivot_rows_wide(rows, id_cols=[])
-    assert len(wide) == 1
-    assert wide[0] == {"mean_radiance_2026-01": 1.0, "mean_radiance_2026-02": 2.0}
-
+# --- attach_geometry / shapefile_safe_field_names / split_rows_by_period --
+# --- write_geo_outputs_per_period (--geo-out) ------------------------------
 
 def test_attach_geometry_adds_geometry_key_without_mutating_input():
     rows = [{"unit_id": "P1"}, {"unit_id": "P2"}]
@@ -934,75 +857,6 @@ def test_shapefile_safe_field_names_many_collisions_stay_unique():
     values = list(mapping.values())
     assert len(set(values)) == len(names)
     assert all(len(v) <= 10 for v in values)
-
-
-def test_build_geo_rows_returns_long_and_wide_with_geometry():
-    rows = _breakdown_rows_for_pivot()
-    geoms = {"P1": "geom-A", "P2": "geom-B"}
-    long_rows, wide_rows = build_geo_rows(
-        rows, id_cols=["adm2_name", "adm2_pcode"], geometry_for_row=lambda r: geoms[r["adm2_pcode"]]
-    )
-    assert len(long_rows) == 4  # same row count as the CSV
-    assert len(wide_rows) == 2  # one per unit
-    assert all(r["geometry"] is not None for r in long_rows + wide_rows)
-    assert long_rows[0]["geometry"] == "geom-A"
-    assert wide_rows[0]["mean_radiance_2026-01"] == 1.0
-
-
-def test_write_geo_outputs_rejects_unsupported_extension(tmp_path):
-    from shapely.geometry import Point
-
-    rows = [{"unit_id": "P1", "geometry": Point(0, 0)}]
-    try:
-        write_geo_outputs(rows, rows, tmp_path / "out.gpkg")
-    except ValueError as e:
-        assert ".geojson" in str(e) and ".shp" in str(e)
-    else:
-        raise AssertionError("expected ValueError for an unsupported --geo-out extension")
-
-
-def test_write_geo_outputs_geojson_roundtrip(tmp_path):
-    import geopandas as gpd
-    from shapely.geometry import Point
-
-    long_rows = [
-        {"adm2_pcode": "P1", "period": "2026-01", "mean_radiance": 1.0, "geometry": Point(0, 0)},
-        {"adm2_pcode": "P1", "period": "2026-02", "mean_radiance": 2.0, "geometry": Point(0, 0)},
-    ]
-    wide_rows = [
-        {"adm2_pcode": "P1", "mean_radiance_2026-01": 1.0, "mean_radiance_2026-02": 2.0, "geometry": Point(0, 0)},
-    ]
-    wide_path, long_path = write_geo_outputs(long_rows, wide_rows, tmp_path / "out.geojson")
-    assert wide_path == tmp_path / "out.geojson"
-    assert long_path == tmp_path / "out_by_period.geojson"
-    assert wide_path.exists() and long_path.exists()
-
-    wide_gdf = gpd.read_file(wide_path)
-    long_gdf = gpd.read_file(long_path)
-    assert len(wide_gdf) == 1
-    assert len(long_gdf) == 2
-    assert "mean_radiance_2026-01" in wide_gdf.columns  # GeoJSON: no truncation
-
-
-def test_write_geo_outputs_shapefile_truncates_and_dedupes_field_names(tmp_path):
-    import geopandas as gpd
-    from shapely.geometry import Point
-
-    wide_rows = [
-        {
-            "adm2_pcode": "P1",
-            "mean_radiance_2026-01": 1.0,
-            "mean_radiance_2026-02": 2.0,
-            "geometry": Point(0, 0),
-        },
-    ]
-    wide_path, long_path = write_geo_outputs(wide_rows, wide_rows, tmp_path / "out.shp")
-    gdf = gpd.read_file(wide_path)
-    long_field_names = ["mean_radiance_2026-01", "mean_radiance_2026-02"]
-    assert all(len(c) <= 10 for c in gdf.columns if c != "geometry")
-    # both original names collapse to distinct <=10-char columns, not one
-    # overwriting the other
-    assert len([c for c in gdf.columns if c != "geometry" and c != "adm2_pcode"]) == len(long_field_names)
 
 
 def test_split_rows_by_period_groups_and_preserves_order():
@@ -1049,6 +903,20 @@ def test_write_geo_outputs_per_period_writes_one_file_per_period(tmp_path):
     # plain column name, not period-suffixed, since each file is already one period
     assert "mean_radiance" in gdf.columns
     assert "mean_radiance_2026-01" not in gdf.columns
+    # "period" itself is dropped by default -- redundant with the filename
+    assert "period" not in gdf.columns
+
+
+def test_write_geo_outputs_per_period_keeps_period_column_when_drop_cols_overridden(tmp_path):
+    import geopandas as gpd
+    from shapely.geometry import Point
+
+    rows_by_period = {
+        "2026-01": [{"adm2_pcode": "P1", "period": "2026-01", "geometry": Point(0, 0)}],
+    }
+    written = write_geo_outputs_per_period(rows_by_period, tmp_path / "out.geojson", drop_cols=())
+    gdf = gpd.read_file(written["2026-01"])
+    assert "period" in gdf.columns
 
 
 def test_write_geo_outputs_per_period_shapefile_applies_field_truncation(tmp_path):

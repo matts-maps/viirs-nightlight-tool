@@ -713,38 +713,6 @@ def rename_unit_columns(
     return renamed
 
 
-def pivot_rows_wide(rows: list[dict], id_cols: list[str], period_col: str = "period") -> list[dict]:
-    """Pure function: reshape one-row-per-(unit, period) rows into one row per
-    unit, with every non-identity column split into a separate
-    "<column>_<period>" column per period -- e.g. "mean_radiance_2026-01".
-
-    `id_cols` names whichever columns identify a unit (already-renamed
-    unit_name/unit_id columns plus any --attributes columns, for a
-    --breakdown run). An empty `id_cols` collapses everything into a single
-    row -- the shape needed for a non-breakdown (whole-AOI) run, where every
-    row already shares the same "unit".
-
-    Used to build the --geo-out "wide" spatial output (--geo-out itself is
-    ee-touching glue; this reshaping step takes no Earth Engine object, so
-    it's unit-testable on its own).
-    """
-    if not rows:
-        return []
-    value_cols = [k for k in rows[0] if k not in id_cols and k != period_col]
-
-    groups: dict[tuple, dict] = {}
-    order: list[tuple] = []
-    for row in rows:
-        key = tuple(row.get(c) for c in id_cols)
-        if key not in groups:
-            groups[key] = {c: row.get(c) for c in id_cols}
-            order.append(key)
-        period = row.get(period_col)
-        for vc in value_cols:
-            groups[key][f"{vc}_{period}"] = row.get(vc)
-    return [groups[k] for k in order]
-
-
 def attach_geometry(rows: list[dict], geometry_for_row) -> list[dict]:
     """Pure function: return a copy of `rows` with a "geometry" key added to
     each, via `geometry_for_row(row)` -- a plain callable, not an Earth
@@ -786,25 +754,11 @@ def shapefile_safe_field_names(names: list[str]) -> dict[str, str]:
     return mapping
 
 
-def build_geo_rows(
-    csv_rows: list[dict], id_cols: list[str], geometry_for_row
-) -> tuple[list[dict], list[dict]]:
-    """Pure function: assemble the --geo-out "long" (one row per unit per
-    period, geometry repeated -- the same shape as the CSV) and "wide" (one
-    row per unit, one column per period) row sets, both with geometry
-    attached. `geometry_for_row` is a plain callable (see attach_geometry),
-    so this makes no Earth Engine calls itself.
-    """
-    long_rows = attach_geometry(csv_rows, geometry_for_row)
-    wide_rows = attach_geometry(pivot_rows_wide(csv_rows, id_cols), geometry_for_row)
-    return long_rows, wide_rows
-
-
 def _geo_out_driver(out_path: Path) -> str:
     """Pure function: infer the geopandas driver name from a --geo-out-style
     path's extension, or raise ValueError with a message naming the bad
-    path -- shared by every --geo-out write path (wide/long and per-period)
-    so the accepted-extensions rule only lives in one place.
+    path -- shared by every --geo-out write path so the accepted-extensions
+    rule only lives in one place.
     """
     suffix = out_path.suffix.lower()
     if suffix in (".geojson", ".json"):
@@ -820,8 +774,8 @@ def _write_geo_file(rows: list[dict], out_path: Path, driver: str):
     """Write one GeoDataFrame built from `rows` (each carrying a "geometry"
     key, see attach_geometry) to `out_path` in `driver` format, applying the
     shapefile field-name-truncation safety net when writing a Shapefile.
-    Shared by write_geo_outputs and write_geo_outputs_per_period so the
-    truncation/warning behavior can't drift between the two call sites.
+    Used by write_geo_outputs_per_period for every period's file, so the
+    truncation/warning behavior is consistent across all of them.
     """
     import geopandas as gpd
 
@@ -840,35 +794,13 @@ def _write_geo_file(rows: list[dict], out_path: Path, driver: str):
     gdf.to_file(out_path, driver=driver)
 
 
-def write_geo_outputs(long_rows: list[dict], wide_rows: list[dict], out_path: Path) -> tuple[Path, Path]:
-    """Write the --geo-out "wide" file to `out_path` and the "long" file to
-    the same path with "_by_period" inserted before the extension. Format
-    (GeoJSON or Shapefile) is inferred from `out_path`'s extension, matching
-    the convention --aoi-file already uses.
-
-    Each row in `long_rows`/`wide_rows` must carry a "geometry" key holding
-    a shapely geometry (see attach_geometry) -- rows with geometry=None are
-    dropped by the caller before this is called, not here, since only the
-    caller knows which unit that was and can warn about it by name.
-
-    Doesn't touch `ee` -- only geopandas file I/O -- so it's testable
-    offline by writing to a temp path and reading the result back.
-    """
-    driver = _geo_out_driver(out_path)
-    long_path = out_path.with_name(f"{out_path.stem}_by_period{out_path.suffix}")
-    wide_path = out_path
-    _write_geo_file(long_rows, long_path, driver)
-    _write_geo_file(wide_rows, wide_path, driver)
-    return wide_path, long_path
-
-
 def split_rows_by_period(rows: list[dict], period_col: str = "period") -> dict[str, list[dict]]:
     """Pure function: group already-geometry-attached rows (see
     attach_geometry) by their period value, preserving first-seen period
-    order. Used to build the --geo-out-per-period output -- one spatial file
-    per period, each row keeping its plain column names (mean_radiance, not
-    mean_radiance_2026-01) since every row in a given file already shares
-    that one period.
+    order. This is how --geo-out builds one spatial file per period -- one
+    per frequency step (month/week/year/day, whichever --freq is), matching
+    what --breakdown/--freq already computed, rather than one combined
+    multi-period file.
     """
     groups: dict[str, list[dict]] = {}
     for row in rows:
@@ -878,22 +810,27 @@ def split_rows_by_period(rows: list[dict], period_col: str = "period") -> dict[s
 
 
 def write_geo_outputs_per_period(
-    rows_by_period: dict[str, list[dict]], out_path: Path
+    rows_by_period: dict[str, list[dict]],
+    out_path: Path,
+    drop_cols: tuple[str, ...] = ("period",),
 ) -> dict[str, Path]:
     """Write one spatial file per period from `rows_by_period` (see
-    split_rows_by_period), named "<stem>_<period><ext>" next to `out_path`.
-    Format is inferred from `out_path`'s extension, same rule as
-    write_geo_outputs. Returns {period: path_written}, in the same order as
-    `rows_by_period`.
+    split_rows_by_period), named "<stem>_<period><ext>" next to `out_path"
+    -- the period is already at the end of every filename, so `drop_cols`
+    defaults to dropping the now-redundant "period" column from each
+    feature's attributes (every row in a given file already shares that one
+    period). Format is inferred from `out_path`'s extension. Returns
+    {period: path_written}, in the same order as `rows_by_period`.
 
     Doesn't touch `ee` -- only geopandas file I/O -- so it's testable
-    offline the same way write_geo_outputs is.
+    offline by writing to a temp path and reading the result back.
     """
     driver = _geo_out_driver(out_path)
     written: dict[str, Path] = {}
     for period, rows in rows_by_period.items():
         period_path = out_path.with_name(f"{out_path.stem}_{period}{out_path.suffix}")
-        _write_geo_file(rows, period_path, driver)
+        trimmed_rows = [{k: v for k, v in row.items() if k not in drop_cols} for row in rows]
+        _write_geo_file(trimmed_rows, period_path, driver)
         written[period] = period_path
     return written
 
@@ -1119,25 +1056,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--geo-out",
         default=None,
         help=(
-            "Optional path for a spatial output joined to the boundary geometry by the "
-            "unit's unique identifier/pcode, in addition to --out's CSV. Format is inferred "
-            "from the extension: .geojson or .shp. Writes two files: one at this path with "
-            "one feature per unit and one column per period ('wide'), and one at the same "
-            "path with '_by_period' inserted before the extension with one feature per unit "
-            "per period, geometry repeated ('long', the same rows as the CSV plus geometry). "
-            "Works with or without --breakdown -- without it, there's just one implicit "
-            "'unit' (the whole AOI)."
-        ),
-    )
-    p.add_argument(
-        "--geo-out-per-period",
-        action="store_true",
-        help=(
-            "Requires --geo-out. Also write one additional spatial file per period, named "
-            "'<geo-out stem>_<period><ext>' next to --geo-out's path -- each with one feature "
-            "per unit and that period's stats as plain columns (e.g. mean_radiance, not "
-            "mean_radiance_2026-01). Useful for stepping through or animating months in a GIS. "
-            "Written alongside (not instead of) the usual wide and _by_period long files."
+            "Optional path for spatial output joined to the boundary geometry by the unit's "
+            "unique identifier/pcode, in addition to --out's CSV. Format is inferred from the "
+            "extension: .geojson or .shp. Writes one file per period (month/week/year/day, "
+            "whichever --freq is), named '<stem>_<period><ext>' next to this path -- one "
+            "feature per unit, with the unit's name/ID/attributes columns plus mean_radiance, "
+            "sum_radiance, median_radiance, valid_pixel_count, scene_count, and qa_flag. Works "
+            "with or without --breakdown -- without it, there's just one implicit 'unit' (the "
+            "whole AOI)."
         ),
     )
     p.add_argument(
@@ -1518,8 +1444,8 @@ def run_wizard() -> list[str]:
     argv += ["--out", _prompt_text("Output CSV path", default="out/nightlights.csv")]
 
     if _prompt_yes_no(
-        "Also write a spatial file (GeoJSON/Shapefile) joined by the unit's unique "
-        "ID/pcode?",
+        "Also write spatial output (GeoJSON/Shapefile), one file per period, joined by "
+        "the unit's unique ID/pcode?",
         default=False,
     ):
         geo_out = _prompt_text(
@@ -1527,12 +1453,6 @@ def run_wizard() -> list[str]:
         ).strip()
         if geo_out:
             argv += ["--geo-out", geo_out]
-            if _prompt_yes_no(
-                "Also write one extra spatial file per period (e.g. per month), for "
-                "stepping through/animating in a GIS?",
-                default=False,
-            ):
-                argv += ["--geo-out-per-period"]
 
     if breakdown_choice == 0:
         if _prompt_yes_no("Also write a chart PNG next to the CSV?", default=True):
@@ -1585,9 +1505,8 @@ def build_argv_from_form(fields: dict) -> list[str]:
         start, end: str, YYYY-MM-DD (required)
         freq: one of VALID_FREQS (required)
         out: str, output CSV path (required)
-        geo_out: str -- optional path for a joined spatial output (.geojson or .shp)
-        geo_out_per_period: bool -- also write one spatial file per period; only
-            meaningful (and only applied) when geo_out is also set
+        geo_out: str -- optional path for a joined spatial output (.geojson or .shp),
+            written as one file per period
         chart: bool
         chart_units: str (comma-separated) or list[str] -- only used if chart
             and breakdown_level are both set
@@ -1680,8 +1599,6 @@ def build_argv_from_form(fields: dict) -> list[str]:
     geo_out = (fields.get("geo_out") or "").strip()
     if geo_out:
         argv += ["--geo-out", geo_out]
-        if fields.get("geo_out_per_period"):
-            argv.append("--geo-out-per-period")
 
     if fields.get("chart"):
         argv.append("--chart")
@@ -1711,11 +1628,6 @@ def main(argv: Optional[list[str]] = None) -> int:
             return 1
 
     args = build_arg_parser().parse_args(argv)
-    if args.geo_out_per_period and not args.geo_out:
-        print(
-            "Warning: --geo-out-per-period has no effect without --geo-out — ignoring it.",
-            file=sys.stderr,
-        )
     attribute_fields = (
         [f.strip() for f in args.attributes.split(",") if f.strip()] if args.attributes else None
     )
@@ -1830,47 +1742,31 @@ def main(argv: Optional[list[str]] = None) -> int:
                 if geom is None:
                     missing_keys.add(key)
                 return geom
-
-            id_cols = [unit_name_column]
-            if unit_id_column and unit_id_column != unit_name_column:
-                id_cols.append(unit_id_column)
-            if attribute_fields:
-                id_cols += [f for f in attribute_fields if f not in id_cols]
         else:
             whole_aoi_geometry = fetch_whole_aoi_geometry(aoi_geom)
 
             def geometry_for_row(row):
                 return whole_aoi_geometry
 
-            id_cols = []
-
-        long_rows, wide_rows = build_geo_rows(csv_rows, id_cols, geometry_for_row)
+        geo_rows = attach_geometry(csv_rows, geometry_for_row)
         if missing_keys:
             print(
                 f"Warning: {len(missing_keys)} unit(s) had no matching geometry and were "
                 f"left out of the spatial output: {sorted(missing_keys, key=str)}",
                 file=sys.stderr,
             )
-            long_rows = [r for r in long_rows if r["geometry"] is not None]
-            wide_rows = [r for r in wide_rows if r["geometry"] is not None]
+            geo_rows = [r for r in geo_rows if r["geometry"] is not None]
 
+        rows_by_period = split_rows_by_period(geo_rows)
         try:
-            wide_path, long_path = write_geo_outputs(long_rows, wide_rows, geo_out_path)
+            per_period_paths = write_geo_outputs_per_period(rows_by_period, geo_out_path)
         except ValueError as e:
             print(str(e), file=sys.stderr)
             return 1
         print(
-            f"Wrote spatial output: {wide_path} ({len(wide_rows)} unit(s), one feature each) "
-            f"and {long_path} ({len(long_rows)} unit-period rows, geometry repeated per period)"
+            f"Wrote {len(per_period_paths)} spatial file(s), one per period: "
+            f"{', '.join(str(p) for p in per_period_paths.values())}"
         )
-
-        if args.geo_out_per_period:
-            rows_by_period = split_rows_by_period(long_rows)
-            per_period_paths = write_geo_outputs_per_period(rows_by_period, geo_out_path)
-            print(
-                f"Wrote {len(per_period_paths)} per-period spatial file(s): "
-                f"{', '.join(str(p) for p in per_period_paths.values())}"
-            )
 
     if args.chart:
         chart_path = out_path.with_suffix(".png")
