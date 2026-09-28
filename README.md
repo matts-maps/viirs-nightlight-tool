@@ -130,3 +130,19 @@ correctly, before spending an Earth Engine call on a real AOI.
   reference dataset and may not reflect current or contested administrative
   boundaries precisely — for anything Crimea/Ukraine-specific, supply your
   own `--aoi-file` from a source you trust instead.
+- No spatial output — the tool only writes a CSV (+ optional PNG chart), not
+  a shapefile/GeoJSON. See Roadmap below.
+
+## Roadmap
+
+- **Baseline/change detection** — flag a period as a % drop vs. a
+  user-defined baseline (e.g. pre-war average), for spotting likely
+  blackouts/damage rather than just reading a trend line by eye.
+- **Spatial output** — currently the tool only produces a CSV time series;
+  it doesn't export a shapefile/GeoJSON of anything. Two candidate additions:
+  - an `--export-clipped-raster` style flag that also writes the reduced
+    VIIRS image for the AOI as a small GeoTIFF, for visual sanity-checking
+    of the mask/clip in a GIS
+  - a multi-unit mode that takes a boundary file with several features (e.g.
+    all of Crimea's raions) and writes a GeoJSON/shapefile with each unit's
+    result as an attribute, joinable straight into a map, alongside the CSV
