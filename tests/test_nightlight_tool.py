@@ -20,6 +20,7 @@ from nightlight_tool import (
     build_periods,
     list_file_fields,
     qa_flag,
+    resolve_iso3_candidate_names,
     simplify_geometry,
     summarize_pixels,
     write_csv,
@@ -285,6 +286,35 @@ def pytest_approx(value, rel):
             return abs(other - value) <= abs(value) * rel
 
     return _Approx()
+
+
+def test_resolve_iso3_candidate_names_simple_case():
+    # Ukraine is the easy case -- pycountry's plain name matches GAUL's
+    # ADM0_NAME exactly, no fallback needed.
+    assert resolve_iso3_candidate_names("UKR") == ["Ukraine"]
+
+
+def test_resolve_iso3_candidate_names_is_case_insensitive_input():
+    assert resolve_iso3_candidate_names("ukr") == ["Ukraine"]
+
+
+def test_resolve_iso3_candidate_names_multiple_candidates_for_tricky_country():
+    # South Korea is the case that motivates trying several candidates: none
+    # of pycountry's fields alone reliably matches whatever GAUL happens to
+    # use, so all non-empty name fields should come back for the caller to
+    # try in turn.
+    candidates = resolve_iso3_candidate_names("KOR")
+    assert "South Korea" in candidates  # common_name
+    assert any("Korea" in c for c in candidates)
+
+
+def test_resolve_iso3_candidate_names_rejects_unknown_code():
+    try:
+        resolve_iso3_candidate_names("XXX")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError for an unrecognised ISO3 code")
 
 
 def test_list_file_fields_excludes_geometry():

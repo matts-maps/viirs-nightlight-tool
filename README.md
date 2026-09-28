@@ -98,12 +98,28 @@ python nightlight_tool.py --aoi-name "Ukraine" \
     --start 2021-01-01 --end 2026-09-01 --freq annual --out ukraine_annual.csv
 ```
 
+Or by ISO 3166-1 alpha-3 country code, which sidesteps having to know GAUL's
+exact country-name spelling:
+
+```bash
+python nightlight_tool.py --aoi-iso3 UKR \
+    --start 2021-01-01 --end 2026-09-01 --freq annual --out ukraine_annual.csv
+```
+
+`--aoi-iso3` resolves the code to a country name and matches it against GAUL
+automatically (GAUL boundaries don't carry ISO codes themselves) — it prints
+which GAUL country name it matched to, so you can confirm it got the right
+one. If no confident match is found (rare, but possible for a country whose
+GAUL name is unusual), it errors out and tells you to use `--aoi-name` with
+the exact GAUL name instead.
+
 ### Arguments
 
 | Flag | Required | Notes |
 |---|---|---|
-| `--aoi-file` | one of `--aoi-file` / `--aoi-name` | path to a GeoJSON/shapefile/etc. — for a specific sub-unit (e.g. one raion), get a proper boundary from a source like [fieldmaps.io](https://fieldmaps.io), [HDX COD](https://data.humdata.org/), or [GADM](https://gadm.org) |
+| `--aoi-file` | one of `--aoi-file` / `--aoi-name` / `--aoi-iso3` | path to a GeoJSON/shapefile/etc. — for a specific sub-unit (e.g. one raion), get a proper boundary from a source like [fieldmaps.io](https://fieldmaps.io), [HDX COD](https://data.humdata.org/), or [GADM](https://gadm.org) |
 | `--aoi-name` | — | admin name to look up, e.g. `"Ukraine"`, or an admin-1/2 name |
+| `--aoi-iso3` | — | ISO 3166-1 alpha-3 country code, e.g. `UKR` — resolved to a GAUL country name automatically |
 | `--start`, `--end` | yes | ISO dates, `--end` is exclusive |
 | `--freq` | yes | `daily`, `weekly`, `monthly`, or `annual` |
 | `--out` | yes | output CSV path |
@@ -289,9 +305,10 @@ correctly, before spending an Earth Engine call on a real AOI.
 
 Towards a tool anyone can pick up without reading this whole README first:
 
-- **Global-dataset AOI picker** — a country dropdown/lookup backed by a
-  bundled or fetched dataset (fieldmaps.io and/or the latest GAUL release),
-  so `--aoi-name` doesn't depend on knowing GAUL's exact naming.
+- **Fieldmaps.io/global-dataset AOI picker** — `--aoi-iso3` (see above) covers
+  unambiguous country selection; a fuller country dropdown backed by
+  fieldmaps.io and/or the latest GAUL release, plus admin1/2-level lookups
+  by code rather than name, is the next step.
 - **Geodatabase (`.gdb`) input** — `--aoi-file`/`--unit-name-field` currently
   read via `geopandas`, which supports `.gdb`, but this hasn't been tested or
   documented as a supported input format yet.
@@ -309,4 +326,6 @@ Towards a tool anyone can pick up without reading this whole README first:
   or a "pick N units to chart" option would close this gap.
 
 Already delivered towards the "anyone can use it" goal: `--wizard` interactive
-mode, `weekly` frequency, and `--attributes` for choosing output columns.
+mode (which also shows the actual admin-data fields available before you pick
+`--attributes`), `weekly` frequency, `--attributes` for choosing output
+columns, and `--aoi-iso3` for unambiguous country selection.

@@ -265,9 +265,95 @@ def write_chart(rows: list[dict], chart_path: Path, value_field: str = "mean_rad
     plt.close(fig)
 
 
+def resolve_iso3_candidate_names(iso3: str) -> list[str]:
+    """Pure function: given an ISO 3166-1 alpha-3 code, return candidate country
+    name strings to try against FAO GAUL's ADM0_NAME field.
+
+    GAUL boundaries don't carry ISO codes themselves, and pycountry's own name
+    fields often don't match GAUL's exact ADM0_NAME string either (e.g. for
+    COD, pycountry's `name` is "Congo, The Democratic Republic of the" while
+    GAUL uses "Democratic Republic of the Congo") -- so this returns several
+    candidates (common/short name, full name, official name) for the caller
+    to try in turn, with a final fallback match against the live GAUL country
+    list happening on the Earth Engine side (see resolve_iso3_to_gaul_name).
+
+    Raises ValueError for a code pycountry doesn't recognise. No `ee` import
+    here, so this half is unit-testable offline like the rest of this section.
+    """
+    import pycountry
+
+    country = pycountry.countries.get(alpha_3=iso3.upper())
+    if country is None:
+        raise ValueError(
+            f"{iso3!r} is not a recognised ISO 3166-1 alpha-3 country code "
+            "(e.g. 'UKR', 'USA', 'KOR')."
+        )
+    candidates = []
+    for attr in ("common_name", "name", "official_name"):
+        val = getattr(country, attr, None)
+        if val and val not in candidates:
+            candidates.append(val)
+    return candidates
+
+
 # ---------------------------------------------------------------------------
 # Earth Engine glue — only this half touches `ee`.
 # ---------------------------------------------------------------------------
+
+def _ensure_ee_initialized(ee_project: Optional[str] = None) -> None:
+    """Initialize Earth Engine if it isn't already, used by the wizard's live
+    lookups which can run before main()'s own ee.Initialize() call."""
+    import ee
+
+    try:
+        ee.data.getAssetRoots()
+    except Exception:  # noqa: BLE001 -- not yet initialized
+        if ee_project:
+            ee.Initialize(project=ee_project)
+        else:
+            ee.Initialize()
+
+
+def resolve_iso3_to_gaul_name(iso3: str, ee_project: Optional[str] = None) -> str:
+    """Match an ISO3 code to the exact ADM0_NAME string FAO GAUL uses for that
+    country. Tries resolve_iso3_candidate_names()'s candidates as exact
+    matches first, then falls back to a case-insensitive match against GAUL's
+    actual country list (GAUL level0 is only ~250 features, small enough to
+    pull client-side for this). Raises ValueError, listing what was tried,
+    if nothing lines up -- at that point --aoi-name with the exact GAUL name
+    is the fallback.
+    """
+    import ee
+
+    _ensure_ee_initialized(ee_project)
+    candidates = resolve_iso3_candidate_names(iso3)
+    gaul0 = ee.FeatureCollection("FAO/GAUL/2015/level0")
+
+    for name in candidates:
+        if gaul0.filter(ee.Filter.eq("ADM0_NAME", name)).size().getInfo() > 0:
+            return name
+
+    all_names = gaul0.aggregate_array("ADM0_NAME").getInfo()
+    lower_map = {n.lower(): n for n in all_names}
+    for name in candidates:
+        hit = lower_map.get(name.lower())
+        if hit:
+            return hit
+
+    for name in candidates:
+        substring_matches = [
+            n for n in all_names if name.lower() in n.lower() or n.lower() in name.lower()
+        ]
+        if len(substring_matches) == 1:
+            return substring_matches[0]
+
+    raise ValueError(
+        f"Could not match ISO3 {iso3!r} to a FAO GAUL country name. Tried: "
+        f"{candidates}. Use --aoi-name with the exact GAUL ADM0_NAME instead "
+        "-- inspect FAO/GAUL/2015/level0's ADM0_NAME values if you're not "
+        "sure what GAUL calls it."
+    )
+
 
 def resolve_aoi_geometry(aoi_file: Optional[str], aoi_name: Optional[str]):
     """Return an ee.Geometry for the AOI, from a boundary file or a name lookup."""
@@ -551,6 +637,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     aoi_group = p.add_mutually_exclusive_group(required=True)
     aoi_group.add_argument("--aoi-file", help="Path to a boundary file (GeoJSON/shapefile/etc.)")
     aoi_group.add_argument("--aoi-name", help="Country/admin name to look up in FAO GAUL")
+    aoi_group.add_argument(
+        "--aoi-iso3",
+        help=(
+            "ISO 3166-1 alpha-3 country code to look up (e.g. 'UKR'). Matched against "
+            "FAO GAUL's country names automatically (GAUL doesn't carry ISO codes itself) "
+            "-- if no confident match is found, use --aoi-name with the exact GAUL name."
+        ),
+    )
     p.add_argument("--start", required=True, help="Start date, YYYY-MM-DD (inclusive)")
     p.add_argument("--end", required=True, help="End date, YYYY-MM-DD (exclusive)")
     p.add_argument("--freq", required=True, choices=VALID_FREQS, help="Time step")
@@ -666,13 +760,7 @@ def list_gaul_fields(aoi_name: str, breakdown: str, ee_project: Optional[str] = 
     """
     import ee
 
-    try:
-        ee.data.getAssetRoots()
-    except Exception:  # noqa: BLE001 -- not yet initialized
-        if ee_project:
-            ee.Initialize(project=ee_project)
-        else:
-            ee.Initialize()
+    _ensure_ee_initialized(ee_project)
 
     asset_id = {"admin1": "FAO/GAUL/2015/level1", "admin2": "FAO/GAUL/2015/level2"}[breakdown]
     fc = ee.FeatureCollection(asset_id).filter(ee.Filter.eq("ADM0_NAME", aoi_name))
@@ -696,17 +784,24 @@ def run_wizard() -> list[str]:
 
     argv: list[str] = []
     ee_project: Optional[str] = None  # asked for once, as soon as it's actually needed
+    ee_project_asked = False  # distinguishes "asked, left blank" from "not asked yet"
 
     aoi_choice = _prompt_choice(
         "Area of interest",
         [
+            "Look up a country by ISO 3166-1 alpha-3 code (e.g. 'UKR')",
             "Look up a country or admin unit by name (FAO GAUL)",
             "Supply my own boundary file (shapefile, GeoJSON, or geodatabase)",
         ],
     )
+    gaul_country_name: Optional[str] = None  # resolved lazily, only if actually needed below
     if aoi_choice == 0:
+        aoi_iso3 = _prompt_text("ISO3 country code (e.g. 'UKR', 'USA', 'KOR')").strip().upper()
+        argv += ["--aoi-iso3", aoi_iso3]
+    elif aoi_choice == 1:
         aoi_name = _prompt_text("Country or admin-unit name (e.g. 'Ukraine')")
         argv += ["--aoi-name", aoi_name]
+        gaul_country_name = aoi_name
     else:
         aoi_file = _prompt_text("Path to your boundary file")
         argv += ["--aoi-file", aoi_file]
@@ -723,7 +818,7 @@ def run_wizard() -> list[str]:
         breakdown = "admin1" if breakdown_choice == 1 else "admin2"
         argv += ["--breakdown", breakdown]
 
-        if aoi_choice == 1:
+        if aoi_choice == 2:  # own file
             available_fields: list[str] = []
             try:
                 available_fields = list_file_fields(aoi_file)
@@ -738,22 +833,32 @@ def run_wizard() -> list[str]:
                 "--unit-name-field",
                 _prompt_text("Which column names each unit"),
             ]
-        else:
-            print(
-                "\nLooking up available fields on FAO GAUL "
-                f"{breakdown} units for {aoi_name!r} ..."
-            )
+        else:  # GAUL-backed, either ISO3 or name
             ee_project = _prompt_text(
                 "Earth Engine cloud project ID (blank if your account doesn't need one)",
                 default="",
             ).strip() or None
+            ee_project_asked = True
+
+            if gaul_country_name is None:  # came in via ISO3 -- resolve it to look up fields
+                try:
+                    gaul_country_name = resolve_iso3_to_gaul_name(aoi_iso3, ee_project)
+                    print(f"ISO3 {aoi_iso3!r} matched FAO GAUL country {gaul_country_name!r}.")
+                except Exception as e:  # noqa: BLE001
+                    print(f"  (Couldn't resolve ISO3 {aoi_iso3!r} to a GAUL country yet: {e})")
+
             available_fields = []
-            try:
-                available_fields = list_gaul_fields(aoi_name, breakdown, ee_project)
-            except Exception as e:  # noqa: BLE001
-                print(f"  (Couldn't look up GAUL fields: {e})")
+            if gaul_country_name:
+                print(
+                    f"\nLooking up available fields on FAO GAUL {breakdown} units for "
+                    f"{gaul_country_name!r} ..."
+                )
+                try:
+                    available_fields = list_gaul_fields(gaul_country_name, breakdown, ee_project)
+                except Exception as e:  # noqa: BLE001
+                    print(f"  (Couldn't look up GAUL fields: {e})")
             if available_fields:
-                print(f"Fields available on GAUL {breakdown} units for {aoi_name!r}:")
+                print(f"Fields available on GAUL {breakdown} units for {gaul_country_name!r}:")
                 for f in available_fields:
                     print(f"  - {f}")
             else:
@@ -785,7 +890,7 @@ def run_wizard() -> list[str]:
         if _prompt_yes_no("Also write a chart PNG next to the CSV?", default=True):
             argv.append("--chart")
 
-    if ee_project is None:
+    if not ee_project_asked:
         ee_project = _prompt_text(
             "Earth Engine cloud project ID (blank if your account doesn't need one)", default=""
         ).strip() or None
@@ -836,6 +941,20 @@ def main(argv: Optional[list[str]] = None) -> int:
             file=sys.stderr,
         )
         return 1
+
+    if args.aoi_iso3:
+        try:
+            resolved_name = resolve_iso3_to_gaul_name(args.aoi_iso3)
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
+            return 1
+        print(
+            f"ISO3 code {args.aoi_iso3.upper()!r} matched FAO GAUL country {resolved_name!r}.",
+            file=sys.stderr,
+        )
+        # From here on, treat it exactly like --aoi-name — every other code path
+        # (single-AOI lookup, --breakdown, etc.) already knows how to handle that.
+        args.aoi_name = resolved_name
 
     rows = []
 

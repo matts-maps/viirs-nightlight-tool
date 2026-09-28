@@ -4,3 +4,4 @@ shapely>=2.0
 pandas>=2.0
 matplotlib>=3.7
 numpy>=1.24
+pycountry>=23.12
