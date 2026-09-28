@@ -163,6 +163,28 @@ def test_build_breakdown_row_admin2_carries_parent_name():
     assert row["admin2_name"] == "Some District"
 
 
+def test_build_breakdown_row_unprefixed_stat_keys():
+    # reduceRegions has been observed returning bare reducer output names
+    # ("mean") rather than band-prefixed ones ("avg_rad_mean") for a
+    # single-band image — this is the exact bug hit against real Yemen data,
+    # where every stat column came back blank because only the prefixed key
+    # was checked.
+    props = {
+        "unit_name": "Aden",
+        "ADM0_NAME": "Yemen",
+        "ADM1_NAME": "Aden",
+        "mean": 4.4,
+        "sum": 900.0,
+        "median": 1.5,
+        "count": 200,
+    }
+    row = build_breakdown_row("2022", "avg_rad", props, scene_count=12)
+    assert row["mean_radiance"] == 4.4
+    assert row["sum_radiance"] == 900.0
+    assert row["median_radiance"] == 1.5
+    assert row["valid_pixel_count"] == 200
+
+
 def test_build_breakdown_row_no_data():
     # Mirrors the no-data path: only unit_name is known, everything else is None.
     row = build_breakdown_row("2022-01", "avg_rad", {"unit_name": "Empty Unit"}, scene_count=0)

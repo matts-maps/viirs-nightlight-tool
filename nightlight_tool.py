@@ -112,6 +112,21 @@ def build_periods(start: str, end: str, freq: str) -> list[Period]:
     return periods
 
 
+def _get_stat(feature_properties: dict, band: str, stat: str):
+    """Look up one reducer output, tolerant of two different Earth Engine naming
+    conventions we've observed in practice: `Image.reduceRegion` (single AOI)
+    prefixes outputs with the band name (e.g. "avg_rad_mean"), while
+    `Image.reduceRegions` (per-feature, used by --breakdown) has returned the
+    bare reducer output name (e.g. "mean") with a single selected band. Rather
+    than assume one or the other, check both so this survives an EE API/version
+    difference either way.
+    """
+    for key in (stat, f"{band}_{stat}"):
+        if key in feature_properties:
+            return feature_properties[key]
+    return None
+
+
 def build_breakdown_row(
     period_label: str, band: str, feature_properties: dict, scene_count: int
 ) -> dict:
@@ -127,10 +142,10 @@ def build_breakdown_row(
         "admin0_name": feature_properties.get("ADM0_NAME"),
         "admin1_name": feature_properties.get("ADM1_NAME"),
         "admin2_name": feature_properties.get("ADM2_NAME"),
-        "mean_radiance": feature_properties.get(f"{band}_mean"),
-        "sum_radiance": feature_properties.get(f"{band}_sum"),
-        "median_radiance": feature_properties.get(f"{band}_median"),
-        "valid_pixel_count": feature_properties.get(f"{band}_count"),
+        "mean_radiance": _get_stat(feature_properties, band, "mean"),
+        "sum_radiance": _get_stat(feature_properties, band, "sum"),
+        "median_radiance": _get_stat(feature_properties, band, "median"),
+        "valid_pixel_count": _get_stat(feature_properties, band, "count"),
         "scene_count": scene_count,
         "qa_flag": qa_flag(scene_count, None),
     }
