@@ -166,6 +166,7 @@ the exact GAUL name instead.
 | `--start`, `--end` | yes | ISO dates, `--end` is exclusive |
 | `--freq` | yes | `daily`, `weekly`, `monthly`, or `annual` |
 | `--out` | yes | output CSV path |
+| `--geo-out` | no | optional spatial output path (`.geojson` or `.shp`), joined to the boundary geometry by the unit's unique ID/pcode (see below) |
 | `--chart` | no | also write a PNG chart next to the CSV — one line chart for a single AOI, or a small-multiples grid (one mini chart per unit) with `--breakdown` (see below) |
 | `--chart-units` | no | comma-separated exact values from the output's unit-name column to chart, when using `--chart` with `--breakdown` (see below) |
 | `--ee-project` | no | your Earth Engine cloud project ID, if required (see step 2) |
@@ -334,6 +335,49 @@ limit. Very small or thin units (e.g. a narrow coastal strip) could be
 distorted more than larger ones at the same tolerance, so it's worth
 sanity-checking a simplified layer's shape before trusting results for
 tiny units.
+
+#### Getting a spatial file out: `--geo-out`
+
+The CSV is great for spreadsheets and charting, but if you want the results
+in a GIS (QGIS, ArcGIS) joined straight to the boundary geometry, add
+`--geo-out` with a `.geojson` or `.shp` path:
+
+```bash
+python nightlight_tool.py --aoi-file crimea_raions.geojson \
+    --unit-name-field raion_name --unit-id-field raion_pcode \
+    --start 2021-01-01 --end 2023-01-01 --freq monthly \
+    --out crimea_by_raion.csv --breakdown admin2 --ee-project ee-masims \
+    --geo-out crimea_by_raion.geojson
+```
+
+The geometry join uses `--unit-id-field` (pcode) when you've given one,
+falling back to the unit-name column otherwise — the same matching logic
+`--chart-units` uses. If a row's ID/name doesn't match any fetched geometry,
+that row is dropped from the spatial output and a warning is printed (the
+CSV still has it).
+
+This writes **two** files, both carrying the exact same columns as the CSV:
+
+- The path you gave (`crimea_by_raion.geojson`) — **wide** format, one
+  feature per unit, with every period's stats as their own block of columns
+  (e.g. `mean_radiance_2021-01`, `mean_radiance_2021-02`, ...). Good for
+  symbolizing a single period, or for a "change over time" choropleth series
+  in a GIS.
+- The same path with `_by_period` inserted before the extension
+  (`crimea_by_raion_by_period.geojson`) — **long** format, one feature per
+  unit *per period*, same shape as the CSV rows plus geometry. Good for
+  animating through time or filtering to one period at a time in a GIS.
+
+`--geo-out` works with or without `--breakdown` — without it, there's just
+one "unit" (the whole AOI), so the wide file has a single feature and the
+long file has one feature per period.
+
+Shapefile field names are capped at 10 characters by the format itself. If
+any of your column names are longer (or two get truncated down to the same
+name), `--geo-out ....shp` truncates and de-duplicates them automatically
+(appending `_2`, `_3`, etc. on a collision) and prints a warning listing
+exactly which names got renamed to what — GeoJSON output isn't affected by
+this limit.
 
 ### Choosing a frequency
 

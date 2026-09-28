@@ -713,6 +713,144 @@ def rename_unit_columns(
     return renamed
 
 
+def pivot_rows_wide(rows: list[dict], id_cols: list[str], period_col: str = "period") -> list[dict]:
+    """Pure function: reshape one-row-per-(unit, period) rows into one row per
+    unit, with every non-identity column split into a separate
+    "<column>_<period>" column per period -- e.g. "mean_radiance_2026-01".
+
+    `id_cols` names whichever columns identify a unit (already-renamed
+    unit_name/unit_id columns plus any --attributes columns, for a
+    --breakdown run). An empty `id_cols` collapses everything into a single
+    row -- the shape needed for a non-breakdown (whole-AOI) run, where every
+    row already shares the same "unit".
+
+    Used to build the --geo-out "wide" spatial output (--geo-out itself is
+    ee-touching glue; this reshaping step takes no Earth Engine object, so
+    it's unit-testable on its own).
+    """
+    if not rows:
+        return []
+    value_cols = [k for k in rows[0] if k not in id_cols and k != period_col]
+
+    groups: dict[tuple, dict] = {}
+    order: list[tuple] = []
+    for row in rows:
+        key = tuple(row.get(c) for c in id_cols)
+        if key not in groups:
+            groups[key] = {c: row.get(c) for c in id_cols}
+            order.append(key)
+        period = row.get(period_col)
+        for vc in value_cols:
+            groups[key][f"{vc}_{period}"] = row.get(vc)
+    return [groups[k] for k in order]
+
+
+def attach_geometry(rows: list[dict], geometry_for_row) -> list[dict]:
+    """Pure function: return a copy of `rows` with a "geometry" key added to
+    each, via `geometry_for_row(row)` -- a plain callable, not an Earth
+    Engine object, so this takes no `ee` dependency and is unit-testable
+    with a fake lookup. A row whose geometry can't be found gets
+    geometry=None (the caller decides whether/how to warn and drop those).
+    """
+    out = []
+    for row in rows:
+        new_row = dict(row)
+        new_row["geometry"] = geometry_for_row(row)
+        out.append(new_row)
+    return out
+
+
+def shapefile_safe_field_names(names: list[str]) -> dict[str, str]:
+    """Pure function: map each name to a version that fits the ESRI
+    Shapefile format's 10-character field-name limit, keeping every result
+    unique. Longer names are truncated to 10 characters; if that collides
+    with an already-assigned name, characters are dropped off the end to
+    make room for a disambiguating digit (or digits, if even more collide).
+
+    geopandas/fiona will silently truncate+may-collide on their own when
+    writing a shapefile with long field names -- doing it explicitly here
+    means collisions are visible (as a warning at the call site) instead of
+    quietly dropping/overwriting a column.
+    """
+    used: set[str] = set()
+    mapping: dict[str, str] = {}
+    for name in names:
+        candidate = name[:10]
+        suffix_n = 1
+        while candidate in used:
+            suffix = str(suffix_n)
+            candidate = name[: 10 - len(suffix)] + suffix
+            suffix_n += 1
+        used.add(candidate)
+        mapping[name] = candidate
+    return mapping
+
+
+def build_geo_rows(
+    csv_rows: list[dict], id_cols: list[str], geometry_for_row
+) -> tuple[list[dict], list[dict]]:
+    """Pure function: assemble the --geo-out "long" (one row per unit per
+    period, geometry repeated -- the same shape as the CSV) and "wide" (one
+    row per unit, one column per period) row sets, both with geometry
+    attached. `geometry_for_row` is a plain callable (see attach_geometry),
+    so this makes no Earth Engine calls itself.
+    """
+    long_rows = attach_geometry(csv_rows, geometry_for_row)
+    wide_rows = attach_geometry(pivot_rows_wide(csv_rows, id_cols), geometry_for_row)
+    return long_rows, wide_rows
+
+
+def write_geo_outputs(long_rows: list[dict], wide_rows: list[dict], out_path: Path) -> tuple[Path, Path]:
+    """Write the --geo-out "wide" file to `out_path` and the "long" file to
+    the same path with "_by_period" inserted before the extension. Format
+    (GeoJSON or Shapefile) is inferred from `out_path`'s extension, matching
+    the convention --aoi-file already uses.
+
+    Each row in `long_rows`/`wide_rows` must carry a "geometry" key holding
+    a shapely geometry (see attach_geometry) -- rows with geometry=None are
+    dropped by the caller before this is called, not here, since only the
+    caller knows which unit that was and can warn about it by name.
+
+    Doesn't touch `ee` -- only geopandas file I/O -- so it's testable
+    offline by writing to a temp path and reading the result back.
+    """
+    suffix = out_path.suffix.lower()
+    if suffix in (".geojson", ".json"):
+        driver = "GeoJSON"
+    elif suffix == ".shp":
+        driver = "ESRI Shapefile"
+    else:
+        raise ValueError(
+            f"--geo-out path must end in .geojson or .shp, got {out_path.suffix!r} ({out_path})"
+        )
+
+    import geopandas as gpd
+
+    long_path = out_path.with_name(f"{out_path.stem}_by_period{out_path.suffix}")
+    wide_path = out_path
+
+    long_gdf = gpd.GeoDataFrame(long_rows, geometry="geometry", crs="EPSG:4326")
+    wide_gdf = gpd.GeoDataFrame(wide_rows, geometry="geometry", crs="EPSG:4326")
+
+    if driver == "ESRI Shapefile":
+        for gdf in (long_gdf, wide_gdf):
+            mapping = shapefile_safe_field_names([c for c in gdf.columns if c != "geometry"])
+            renamed = {k: v for k, v in mapping.items() if k != v}
+            if renamed:
+                print(
+                    f"Note: shortened {len(renamed)} field name(s) to fit the shapefile "
+                    f"10-character limit: {renamed}",
+                    file=sys.stderr,
+                )
+            gdf.rename(columns=mapping, inplace=True)
+
+    long_path.parent.mkdir(parents=True, exist_ok=True)
+    wide_path.parent.mkdir(parents=True, exist_ok=True)
+    long_gdf.to_file(long_path, driver=driver)
+    wide_gdf.to_file(wide_path, driver=driver)
+    return wide_path, long_path
+
+
 def resolve_breakdown_collection(
     aoi_file: Optional[str],
     aoi_name: Optional[str],
@@ -876,6 +1014,37 @@ def fetch_period_breakdown_stats(
     ]
 
 
+def fetch_unit_geometries(fc) -> list[dict]:
+    """For --geo-out: pull each --breakdown unit's geometry (plus its raw
+    unit_name/unit_id) from Earth Engine, in one call -- separate from the
+    per-period stats query, since geometry doesn't change across periods.
+
+    Returns plain dicts keyed like a raw (pre-rename_unit_columns) row --
+    "unit_name", "unit_id", "geometry" (a shapely geometry) -- so
+    _chart_key() can be reused as-is to build the join-key lookup main()
+    uses to attach each geometry to its matching CSV rows.
+    """
+    from shapely.geometry import shape
+
+    features = fc.getInfo()["features"]
+    return [
+        {
+            "unit_name": f.get("properties", {}).get("unit_name"),
+            "unit_id": f.get("properties", {}).get("unit_id"),
+            "geometry": shape(f["geometry"]),
+        }
+        for f in features
+    ]
+
+
+def fetch_whole_aoi_geometry(aoi_geom):
+    """For --geo-out on a non-breakdown run: pull the single whole-AOI
+    geometry down from Earth Engine as a shapely geometry."""
+    from shapely.geometry import shape
+
+    return shape(aoi_geom.getInfo())
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -899,6 +1068,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--end", required=True, help="End date, YYYY-MM-DD (exclusive)")
     p.add_argument("--freq", required=True, choices=VALID_FREQS, help="Time step")
     p.add_argument("--out", required=True, help="Output CSV path")
+    p.add_argument(
+        "--geo-out",
+        default=None,
+        help=(
+            "Optional path for a spatial output joined to the boundary geometry by the "
+            "unit's unique identifier/pcode, in addition to --out's CSV. Format is inferred "
+            "from the extension: .geojson or .shp. Writes two files: one at this path with "
+            "one feature per unit and one column per period ('wide'), and one at the same "
+            "path with '_by_period' inserted before the extension with one feature per unit "
+            "per period, geometry repeated ('long', the same rows as the CSV plus geometry). "
+            "Works with or without --breakdown -- without it, there's just one implicit "
+            "'unit' (the whole AOI)."
+        ),
+    )
     p.add_argument(
         "--chart",
         action="store_true",
@@ -1276,6 +1459,17 @@ def run_wizard() -> list[str]:
 
     argv += ["--out", _prompt_text("Output CSV path", default="out/nightlights.csv")]
 
+    if _prompt_yes_no(
+        "Also write a spatial file (GeoJSON/Shapefile) joined by the unit's unique "
+        "ID/pcode?",
+        default=False,
+    ):
+        geo_out = _prompt_text(
+            "Spatial output path (.geojson or .shp)", default="out/nightlights.geojson"
+        ).strip()
+        if geo_out:
+            argv += ["--geo-out", geo_out]
+
     if breakdown_choice == 0:
         if _prompt_yes_no("Also write a chart PNG next to the CSV?", default=True):
             argv.append("--chart")
@@ -1327,6 +1521,7 @@ def build_argv_from_form(fields: dict) -> list[str]:
         start, end: str, YYYY-MM-DD (required)
         freq: one of VALID_FREQS (required)
         out: str, output CSV path (required)
+        geo_out: str -- optional path for a joined spatial output (.geojson or .shp)
         chart: bool
         chart_units: str (comma-separated) or list[str] -- only used if chart
             and breakdown_level are both set
@@ -1415,6 +1610,10 @@ def build_argv_from_form(fields: dict) -> list[str]:
     if not out:
         raise ValueError("Choose an output CSV path.")
     argv += ["--out", out]
+
+    geo_out = (fields.get("geo_out") or "").strip()
+    if geo_out:
+        argv += ["--geo-out", geo_out]
 
     if fields.get("chart"):
         argv.append("--chart")
@@ -1534,6 +1733,63 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     write_csv(csv_rows, out_path)
     print(f"Wrote {len(rows)} rows to {out_path}")
+
+    if args.geo_out:
+        geo_out_path = Path(args.geo_out)
+        missing_keys: set = set()
+
+        if args.breakdown:
+            unit_geoms = fetch_unit_geometries(fc)
+            # _chart_key() (unit_id when present, else unit_name) doubles as
+            # the join key here -- same "which unit is this really" logic
+            # --chart-units matching already relies on, applied to the raw
+            # (pre-rename) properties fetch_unit_geometries() returns.
+            geom_by_key = {_chart_key(g): g["geometry"] for g in unit_geoms}
+
+            def geometry_for_row(row):
+                key = _chart_key(
+                    {
+                        "unit_id": row.get(unit_id_column) if unit_id_column else None,
+                        "unit_name": row.get(unit_name_column),
+                    }
+                )
+                geom = geom_by_key.get(key)
+                if geom is None:
+                    missing_keys.add(key)
+                return geom
+
+            id_cols = [unit_name_column]
+            if unit_id_column and unit_id_column != unit_name_column:
+                id_cols.append(unit_id_column)
+            if attribute_fields:
+                id_cols += [f for f in attribute_fields if f not in id_cols]
+        else:
+            whole_aoi_geometry = fetch_whole_aoi_geometry(aoi_geom)
+
+            def geometry_for_row(row):
+                return whole_aoi_geometry
+
+            id_cols = []
+
+        long_rows, wide_rows = build_geo_rows(csv_rows, id_cols, geometry_for_row)
+        if missing_keys:
+            print(
+                f"Warning: {len(missing_keys)} unit(s) had no matching geometry and were "
+                f"left out of the spatial output: {sorted(missing_keys, key=str)}",
+                file=sys.stderr,
+            )
+            long_rows = [r for r in long_rows if r["geometry"] is not None]
+            wide_rows = [r for r in wide_rows if r["geometry"] is not None]
+
+        try:
+            wide_path, long_path = write_geo_outputs(long_rows, wide_rows, geo_out_path)
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
+            return 1
+        print(
+            f"Wrote spatial output: {wide_path} ({len(wide_rows)} unit(s), one feature each) "
+            f"and {long_path} ({len(long_rows)} unit-period rows, geometry repeated per period)"
+        )
 
     if args.chart:
         chart_path = out_path.with_suffix(".png")
