@@ -82,8 +82,47 @@ python nightlight_tool.py --aoi-name "Ukraine" \
 | `--start`, `--end` | yes | ISO dates, `--end` is exclusive |
 | `--freq` | yes | `daily`, `monthly`, or `annual` |
 | `--out` | yes | output CSV path |
-| `--chart` | no | also write a PNG line chart next to the CSV |
+| `--chart` | no | also write a PNG line chart next to the CSV (ignored with `--breakdown`, see below) |
 | `--ee-project` | no | your Earth Engine cloud project ID, if required (see step 2) |
+| `--breakdown` | no | `admin1` or `admin2` — output one row per sub-unit per period instead of one row per period (see below) |
+| `--unit-name-field` | no | required alongside `--breakdown` when using `--aoi-file` (see below) |
+
+### Breaking a country down by admin unit
+
+Instead of one AOI-wide number per period, `--breakdown` gives you one row per
+admin unit per period — e.g. every governorate or district in a country, each
+with its own radiance trend:
+
+```bash
+python nightlight_tool.py --aoi-name "Yemen" \
+    --start 2014-01-01 --end 2023-01-01 --freq annual \
+    --out yemen_by_governorate.csv --breakdown admin1 --ee-project ee-masims
+```
+
+This looks up FAO GAUL admin1 (governorate/oblast-level) or admin2
+(district/raion-level) units within that country, and queries all of them for
+each period in a single Earth Engine call (not one call per unit — that
+matters once you're at admin2 scale, which can be hundreds of units).
+
+Output columns add `unit_name`, `admin0_name`, `admin1_name`, `admin2_name`
+(blank where not applicable) alongside the usual radiance/QA columns — so you
+can pivot or join straight into a spreadsheet or GIS. `--chart` is skipped in
+this mode (a single line chart with one line per district isn't a useful
+chart) — pivot the CSV by `unit_name` yourself for a per-unit view.
+
+You can also break down a boundary file you supply yourself instead of a GAUL
+lookup, by adding `--unit-name-field` to say which column/property in the file
+holds each unit's name:
+
+```bash
+python nightlight_tool.py --aoi-file crimea_raions.geojson --unit-name-field raion_name \
+    --start 2021-01-01 --end 2023-01-01 --freq monthly \
+    --out crimea_by_raion.csv --breakdown admin2 --ee-project ee-masims
+```
+
+(Here `--breakdown admin2` is just a label for the output — with `--aoi-file`,
+every feature in the file is kept separate regardless of which admin level
+you name.)
 
 ### Choosing a frequency
 
@@ -130,19 +169,19 @@ correctly, before spending an Earth Engine call on a real AOI.
   reference dataset and may not reflect current or contested administrative
   boundaries precisely — for anything Crimea/Ukraine-specific, supply your
   own `--aoi-file` from a source you trust instead.
-- No spatial output — the tool only writes a CSV (+ optional PNG chart), not
-  a shapefile/GeoJSON. See Roadmap below.
+- Output is tabular (CSV) only, even in `--breakdown` mode — a
+  `unit_name`/`admin1_name`/`admin2_name` column lets you join it back onto a
+  boundary file yourself, but the tool doesn't write a joined
+  shapefile/GeoJSON directly. See Roadmap below.
 
 ## Roadmap
 
 - **Baseline/change detection** — flag a period as a % drop vs. a
   user-defined baseline (e.g. pre-war average), for spotting likely
   blackouts/damage rather than just reading a trend line by eye.
-- **Spatial output** — currently the tool only produces a CSV time series;
-  it doesn't export a shapefile/GeoJSON of anything. Two candidate additions:
-  - an `--export-clipped-raster` style flag that also writes the reduced
-    VIIRS image for the AOI as a small GeoTIFF, for visual sanity-checking
-    of the mask/clip in a GIS
-  - a multi-unit mode that takes a boundary file with several features (e.g.
-    all of Crimea's raions) and writes a GeoJSON/shapefile with each unit's
-    result as an attribute, joinable straight into a map, alongside the CSV
+- **Joined spatial output** — write the `--breakdown` results as a
+  GeoJSON/shapefile with each unit's stats as attributes (geometry + data in
+  one file), rather than a CSV the user joins onto a boundary file themselves.
+- **Clipped raster export** — an `--export-clipped-raster` style flag that
+  also writes the reduced VIIRS image for an AOI as a small GeoTIFF, for
+  visual sanity-checking of the mask/clip in a GIS.

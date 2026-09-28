@@ -112,6 +112,30 @@ def build_periods(start: str, end: str, freq: str) -> list[Period]:
     return periods
 
 
+def build_breakdown_row(
+    period_label: str, band: str, feature_properties: dict, scene_count: int
+) -> dict:
+    """Pure function: turn one reduceRegions-output feature's properties into a row.
+
+    `feature_properties` is a plain dict (as returned by ee's getInfo(), or a fake
+    one in tests) — this function makes no Earth Engine calls itself, which is what
+    keeps it unit-testable without an EE session.
+    """
+    return {
+        "period": period_label,
+        "unit_name": feature_properties.get("unit_name"),
+        "admin0_name": feature_properties.get("ADM0_NAME"),
+        "admin1_name": feature_properties.get("ADM1_NAME"),
+        "admin2_name": feature_properties.get("ADM2_NAME"),
+        "mean_radiance": feature_properties.get(f"{band}_mean"),
+        "sum_radiance": feature_properties.get(f"{band}_sum"),
+        "median_radiance": feature_properties.get(f"{band}_median"),
+        "valid_pixel_count": feature_properties.get(f"{band}_count"),
+        "scene_count": scene_count,
+        "qa_flag": qa_flag(scene_count, None),
+    }
+
+
 def qa_flag(scene_count: int, valid_pixel_fraction: Optional[float]) -> str:
     """Pure QA classification, independent of how the counts were produced.
 
@@ -249,63 +273,60 @@ def daily_pixel_quality_mask(image):
     return image.updateMask(keep_mask)
 
 
-def fetch_period_stats(freq: str, aoi_geom, period: Period, scale: int = 500) -> dict:
-    """Query Earth Engine for one period's zonal radiance stats + QA fields."""
+def _get_period_image_and_scene_count(freq: str, period: Period):
+    """Shared by both single-AOI and breakdown paths: resolve the (image, band,
+    scene_count) for one period, or (None, band, 0) if nothing's available.
+    """
     import ee
 
     start_str = period.start.isoformat()
     end_str = period.end.isoformat()
 
     if freq in ("monthly", "annual"):
+        band = "avg_rad"
         coll = (
             ee.ImageCollection("NOAA/VIIRS/DNB/MONTHLY_V1/VCMSLCFG")
             .filterDate(start_str, end_str)
-            .select("avg_rad")
+            .select(band)
         )
         scene_count = coll.size().getInfo()
         if scene_count == 0:
-            return {
-                "period": period.label,
-                "mean_radiance": None,
-                "sum_radiance": None,
-                "median_radiance": None,
-                "valid_pixel_count": None,
-                "total_pixel_count": None,
-                "scene_count": 0,
-                "qa_flag": "no_data",
-            }
+            return None, band, 0
         # Annual = mean-composite the monthly images first, then reduce once.
         image = coll.mean() if freq == "annual" else coll.mosaic()
-        reducer = (
-            ee.Reducer.mean()
-            .combine(ee.Reducer.sum(), sharedInputs=True)
-            .combine(ee.Reducer.median(), sharedInputs=True)
-            .combine(ee.Reducer.count(), sharedInputs=True)
-        )
-        stats = image.reduceRegion(
-            reducer=reducer, geometry=aoi_geom, scale=scale, maxPixels=1e10, bestEffort=True
-        ).getInfo()
-        valid_count = stats.get("avg_rad_count")
-        return {
-            "period": period.label,
-            "mean_radiance": stats.get("avg_rad_mean"),
-            "sum_radiance": stats.get("avg_rad_sum"),
-            "median_radiance": stats.get("avg_rad_median"),
-            "valid_pixel_count": valid_count,
-            "total_pixel_count": None,  # not tracked for the pre-composited product
-            "scene_count": scene_count,
-            "qa_flag": qa_flag(scene_count, None),
-        }
+        return image, band, scene_count
 
     # daily
+    band = "Gap_Filled_DNB_BRDF_Corrected_NTL"
     coll = (
         ee.ImageCollection("NASA/VIIRS/002/VNP46A2")
         .filterDate(start_str, end_str)
         .map(daily_pixel_quality_mask)
-        .select("Gap_Filled_DNB_BRDF_Corrected_NTL")
+        .select(band)
     )
     scene_count = coll.size().getInfo()
     if scene_count == 0:
+        return None, band, 0
+    image = coll.mosaic()
+    return image, band, scene_count
+
+
+def _combined_reducer():
+    import ee
+
+    return (
+        ee.Reducer.mean()
+        .combine(ee.Reducer.sum(), sharedInputs=True)
+        .combine(ee.Reducer.median(), sharedInputs=True)
+        .combine(ee.Reducer.count(), sharedInputs=True)
+    )
+
+
+def fetch_period_stats(freq: str, aoi_geom, period: Period, scale: int = 500) -> dict:
+    """Query Earth Engine for one period's zonal radiance stats + QA fields
+    over a single AOI geometry."""
+    image, band, scene_count = _get_period_image_and_scene_count(freq, period)
+    if image is None:
         return {
             "period": period.label,
             "mean_radiance": None,
@@ -316,28 +337,98 @@ def fetch_period_stats(freq: str, aoi_geom, period: Period, scale: int = 500) ->
             "scene_count": 0,
             "qa_flag": "no_data",
         }
-    image = coll.mosaic()
-    reducer = (
-        ee.Reducer.mean()
-        .combine(ee.Reducer.sum(), sharedInputs=True)
-        .combine(ee.Reducer.median(), sharedInputs=True)
-        .combine(ee.Reducer.count(), sharedInputs=True)
-    )
-    band = "Gap_Filled_DNB_BRDF_Corrected_NTL"
+
     stats = image.reduceRegion(
-        reducer=reducer, geometry=aoi_geom, scale=scale, maxPixels=1e10, bestEffort=True
+        reducer=_combined_reducer(), geometry=aoi_geom, scale=scale, maxPixels=1e10, bestEffort=True
     ).getInfo()
-    valid_count = stats.get(f"{band}_count")
     return {
         "period": period.label,
         "mean_radiance": stats.get(f"{band}_mean"),
         "sum_radiance": stats.get(f"{band}_sum"),
         "median_radiance": stats.get(f"{band}_median"),
-        "valid_pixel_count": valid_count,
-        "total_pixel_count": None,
+        "valid_pixel_count": stats.get(f"{band}_count"),
+        "total_pixel_count": None,  # not tracked for the pre-composited/mosaicked product
         "scene_count": scene_count,
         "qa_flag": qa_flag(scene_count, None),
     }
+
+
+def resolve_breakdown_collection(
+    aoi_file: Optional[str],
+    aoi_name: Optional[str],
+    breakdown: str,
+    unit_name_field: Optional[str],
+):
+    """Return an ee.FeatureCollection of sub-units to break the analysis down by,
+    each carrying a 'unit_name' property.
+
+    --aoi-name + --breakdown: looks up FAO GAUL admin1/admin2 units within that
+    country. --aoi-file + --breakdown: keeps every feature in the file separate
+    (rather than dissolving them, like the single-AOI path does) and labels each
+    from --unit-name-field.
+    """
+    import ee
+
+    if aoi_name:
+        level_map = {
+            "admin1": ("FAO/GAUL/2015/level1", "ADM1_NAME"),
+            "admin2": ("FAO/GAUL/2015/level2", "ADM2_NAME"),
+        }
+        asset_id, name_field = level_map[breakdown]
+        fc = ee.FeatureCollection(asset_id).filter(ee.Filter.eq("ADM0_NAME", aoi_name))
+        count = fc.size().getInfo()
+        if count == 0:
+            raise ValueError(
+                f"No {breakdown} units found for country name {aoi_name!r} in "
+                f"{asset_id}. GAUL's country naming can differ from common usage "
+                "— check spelling/capitalisation."
+            )
+        return fc.map(lambda f: f.set("unit_name", f.get(name_field)))
+
+    if aoi_file:
+        if not unit_name_field:
+            raise ValueError(
+                "--unit-name-field is required when using --breakdown with --aoi-file "
+                "(it names the column/property in your boundary file to label each unit with)"
+            )
+        import geopandas as gpd
+
+        gdf = gpd.read_file(aoi_file)
+        if gdf.crs is not None and gdf.crs.to_epsg() != 4326:
+            gdf = gdf.to_crs(epsg=4326)
+        if unit_name_field not in gdf.columns:
+            raise ValueError(
+                f"{unit_name_field!r} not found in {aoi_file} columns: {list(gdf.columns)}"
+            )
+        features = [
+            ee.Feature(ee.Geometry(row.geometry.__geo_interface__), {"unit_name": row[unit_name_field]})
+            for _, row in gdf.iterrows()
+        ]
+        return ee.FeatureCollection(features)
+
+    raise ValueError("--breakdown needs either --aoi-name or --aoi-file (+ --unit-name-field)")
+
+
+def fetch_period_breakdown_stats(freq: str, fc, period: Period, scale: int = 500) -> list[dict]:
+    """Query Earth Engine for one period's zonal stats across every unit in `fc`
+    in a single reduceRegions call, rather than one call per unit."""
+    image, band, scene_count = _get_period_image_and_scene_count(freq, period)
+
+    if image is None:
+        unit_names = fc.aggregate_array("unit_name").getInfo()
+        return [
+            build_breakdown_row(period.label, band, {"unit_name": name}, scene_count=0)
+            for name in unit_names
+        ]
+
+    reduced = image.select(band).reduceRegions(
+        collection=fc, reducer=_combined_reducer(), scale=scale, tileScale=4
+    )
+    features = reduced.getInfo()["features"]
+    return [
+        build_breakdown_row(period.label, band, f["properties"], scene_count)
+        for f in features
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -362,6 +453,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--ee-project",
         default=None,
         help="Earth Engine cloud project ID, if your account needs one (see README)",
+    )
+    p.add_argument(
+        "--breakdown",
+        choices=("admin1", "admin2"),
+        default=None,
+        help=(
+            "Instead of one AOI-wide row per period, output one row per admin unit "
+            "per period. With --aoi-name, looks up FAO GAUL admin1/admin2 units "
+            "within that country. With --aoi-file, keeps each feature in the file "
+            "separate (needs --unit-name-field)."
+        ),
+    )
+    p.add_argument(
+        "--unit-name-field",
+        default=None,
+        help="Property/column in --aoi-file to label each unit with, when using --breakdown with --aoi-file",
     )
     return p
 
@@ -396,21 +503,39 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         return 1
 
-    aoi_geom = resolve_aoi_geometry(args.aoi_file, args.aoi_name)
-
     rows = []
-    for i, period in enumerate(periods, 1):
-        print(f"[{i}/{len(periods)}] {period.label} ...", file=sys.stderr)
-        rows.append(fetch_period_stats(args.freq, aoi_geom, period))
+
+    if args.breakdown:
+        fc = resolve_breakdown_collection(
+            args.aoi_file, args.aoi_name, args.breakdown, args.unit_name_field
+        )
+        unit_count = fc.size().getInfo()
+        print(f"Breaking down into {unit_count} {args.breakdown} units.", file=sys.stderr)
+        for i, period in enumerate(periods, 1):
+            print(f"[{i}/{len(periods)}] {period.label} ...", file=sys.stderr)
+            rows.extend(fetch_period_breakdown_stats(args.freq, fc, period))
+    else:
+        aoi_geom = resolve_aoi_geometry(args.aoi_file, args.aoi_name)
+        for i, period in enumerate(periods, 1):
+            print(f"[{i}/{len(periods)}] {period.label} ...", file=sys.stderr)
+            rows.append(fetch_period_stats(args.freq, aoi_geom, period))
 
     out_path = Path(args.out)
     write_csv(rows, out_path)
     print(f"Wrote {len(rows)} rows to {out_path}")
 
     if args.chart:
-        chart_path = out_path.with_suffix(".png")
-        write_chart(rows, chart_path)
-        print(f"Wrote chart to {chart_path}")
+        if args.breakdown:
+            print(
+                "Note: --chart is skipped in --breakdown mode (one line per unit "
+                "isn't a useful chart at admin1/admin2 scale) — pivot the CSV by "
+                "unit_name yourself for a per-unit view.",
+                file=sys.stderr,
+            )
+        else:
+            chart_path = out_path.with_suffix(".png")
+            write_chart(rows, chart_path)
+            print(f"Wrote chart to {chart_path}")
 
     flagged = [r for r in rows if r.get("qa_flag") not in (None, "ok")]
     if flagged:

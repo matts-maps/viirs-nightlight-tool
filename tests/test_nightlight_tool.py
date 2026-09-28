@@ -16,6 +16,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from nightlight_tool import (
+    build_breakdown_row,
     build_periods,
     qa_flag,
     summarize_pixels,
@@ -121,6 +122,54 @@ def test_write_csv_roundtrip(tmp_path):
     text = out.read_text()
     assert "period,mean_radiance,qa_flag" in text
     assert "2022-01,1.23,ok" in text
+
+
+def test_build_breakdown_row_admin1_ok():
+    props = {
+        "unit_name": "Sana'a",
+        "ADM0_NAME": "Yemen",
+        "ADM1_NAME": "Sana'a",
+        "avg_rad_mean": 3.2,
+        "avg_rad_sum": 1280.0,
+        "avg_rad_median": 1.1,
+        "avg_rad_count": 400,
+    }
+    row = build_breakdown_row("2022-01", "avg_rad", props, scene_count=1)
+    assert row["unit_name"] == "Sana'a"
+    assert row["admin0_name"] == "Yemen"
+    assert row["admin1_name"] == "Sana'a"
+    assert row["admin2_name"] is None
+    assert row["mean_radiance"] == 3.2
+    assert row["sum_radiance"] == 1280.0
+    assert row["median_radiance"] == 1.1
+    assert row["valid_pixel_count"] == 400
+    assert row["scene_count"] == 1
+    assert row["qa_flag"] == "ok"
+
+
+def test_build_breakdown_row_admin2_carries_parent_name():
+    props = {
+        "unit_name": "Some District",
+        "ADM0_NAME": "Yemen",
+        "ADM1_NAME": "Some Governorate",
+        "ADM2_NAME": "Some District",
+        "avg_rad_mean": 0.5,
+        "avg_rad_sum": 20.0,
+        "avg_rad_median": 0.2,
+        "avg_rad_count": 40,
+    }
+    row = build_breakdown_row("2022", "avg_rad", props, scene_count=12)
+    assert row["admin1_name"] == "Some Governorate"
+    assert row["admin2_name"] == "Some District"
+
+
+def test_build_breakdown_row_no_data():
+    # Mirrors the no-data path: only unit_name is known, everything else is None.
+    row = build_breakdown_row("2022-01", "avg_rad", {"unit_name": "Empty Unit"}, scene_count=0)
+    assert row["unit_name"] == "Empty Unit"
+    assert row["mean_radiance"] is None
+    assert row["scene_count"] == 0
+    assert row["qa_flag"] == "no_data"
 
 
 def test_write_csv_rejects_empty(tmp_path):
