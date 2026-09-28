@@ -19,6 +19,7 @@ from nightlight_tool import (
     build_breakdown_row,
     build_periods,
     qa_flag,
+    simplify_geometry,
     summarize_pixels,
     write_csv,
 )
@@ -192,6 +193,49 @@ def test_build_breakdown_row_no_data():
     assert row["mean_radiance"] is None
     assert row["scene_count"] == 0
     assert row["qa_flag"] == "no_data"
+
+
+def test_simplify_geometry_none_tolerance_is_noop():
+    from shapely.geometry import Point
+
+    geom = Point(0, 0).buffer(1.0, quad_segs=64)  # complex circle, many vertices
+    result = simplify_geometry(geom, None)
+    assert result is geom
+
+
+def test_simplify_geometry_zero_or_negative_tolerance_is_noop():
+    from shapely.geometry import Point
+
+    geom = Point(0, 0).buffer(1.0, quad_segs=64)
+    assert simplify_geometry(geom, 0) is geom
+    assert simplify_geometry(geom, -0.5) is geom
+
+
+def test_simplify_geometry_reduces_vertex_count():
+    from shapely.geometry import Point
+
+    geom = Point(0, 0).buffer(1.0, quad_segs=64)  # ~256 vertices
+    original_vertex_count = len(geom.exterior.coords)
+
+    simplified = simplify_geometry(geom, 0.05)
+    simplified_vertex_count = len(simplified.exterior.coords)
+
+    assert simplified_vertex_count < original_vertex_count
+    # Simplification shouldn't distort a smooth circle beyond recognition —
+    # area should stay close to the original.
+    assert simplified.area == pytest_approx(geom.area, rel=0.05)
+
+
+def pytest_approx(value, rel):
+    # Tiny local stand-in so this test file keeps working without pytest
+    # installed (see the __main__ runner below).
+    class _Approx:
+        def __eq__(self, other):
+            if value == 0:
+                return abs(other) <= rel
+            return abs(other - value) <= abs(value) * rel
+
+    return _Approx()
 
 
 def test_write_csv_rejects_empty(tmp_path):

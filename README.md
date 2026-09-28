@@ -86,6 +86,7 @@ python nightlight_tool.py --aoi-name "Ukraine" \
 | `--ee-project` | no | your Earth Engine cloud project ID, if required (see step 2) |
 | `--breakdown` | no | `admin1` or `admin2` — output one row per sub-unit per period instead of one row per period (see below) |
 | `--unit-name-field` | no | required alongside `--breakdown` when using `--aoi-file` (see below) |
+| `--simplify-tolerance` | no | simplify `--aoi-file` geometries by this many degrees before sending to Earth Engine — only relevant to `--breakdown --aoi-file` with a detailed layer (see below) |
 
 ### Breaking a country down by admin unit
 
@@ -123,6 +124,38 @@ python nightlight_tool.py --aoi-file crimea_raions.geojson --unit-name-field rai
 (Here `--breakdown admin2` is just a label for the output — with `--aoi-file`,
 every feature in the file is kept separate regardless of which admin level
 you name.)
+
+#### Large/detailed boundary files: `--simplify-tolerance`
+
+Earth Engine rejects a client-side `FeatureCollection` (which is what
+`--breakdown --aoi-file` builds from your file) once its payload exceeds
+**10MB** — every polygon's full vertex list gets embedded in every API call
+that touches it. A detailed admin2/raion-level file with a few hundred
+units, or one digitized at high resolution, can blow past that limit even
+though the file itself looks modest on disk. You'll see an error like:
+
+```
+googleapiclient.errors.HttpError: 400 ... "Request payload size exceeds the limit: 10485760 bytes."
+```
+
+If you hit this, add `--simplify-tolerance` to simplify each unit's geometry
+before it's sent, e.g.:
+
+```bash
+python nightlight_tool.py --aoi-file ven_admin2.geojson --unit-name-field adm2_name \
+    --start 2024-09-01 --end 2026-09-01 --freq monthly \
+    --out venezuela_admin2.csv --breakdown admin2 --ee-project ee-masims \
+    --simplify-tolerance 0.001
+```
+
+The value is in decimal degrees (roughly `0.001` ≈ 100m at the equator).
+Since VIIRS itself only resolves to ~500m pixels, simplifying well below
+that scale won't meaningfully change the zonal stats for reasonably-sized
+units — start at `0.001` and increase it only if you still hit the payload
+limit. Very small or thin units (e.g. a narrow coastal strip) could be
+distorted more than larger ones at the same tolerance, so it's worth
+sanity-checking a simplified layer's shape before trusting results for
+tiny units.
 
 ### Choosing a frequency
 
@@ -169,6 +202,16 @@ correctly, before spending an Earth Engine call on a real AOI.
   reference dataset and may not reflect current or contested administrative
   boundaries precisely — for anything Crimea/Ukraine-specific, supply your
   own `--aoi-file` from a source you trust instead.
+- GAUL's admin2 coverage is incomplete for some countries, **including
+  Ukraine**: `--aoi-name "Ukraine" --breakdown admin2` returns one row per
+  oblast (admin1) with `admin2_name` set to the literal placeholder
+  `"Administrative unit not available"` and stats identical to the parent
+  oblast — GAUL simply has no real raion-level (admin2) data for Ukraine to
+  return. This is a data-source gap, not a bug in this tool. For genuine
+  raion-level breakdowns, use `--aoi-file` with a real boundary source (e.g.
+  [fieldmaps.io](https://fieldmaps.io) or [HDX COD](https://data.humdata.org/))
+  and `--unit-name-field`, combined with `--simplify-tolerance` if needed
+  (see above).
 - Output is tabular (CSV) only, even in `--breakdown` mode — a
   `unit_name`/`admin1_name`/`admin2_name` column lets you join it back onto a
   boundary file yourself, but the tool doesn't write a joined

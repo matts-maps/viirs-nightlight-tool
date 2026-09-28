@@ -368,11 +368,31 @@ def fetch_period_stats(freq: str, aoi_geom, period: Period, scale: int = 500) ->
     }
 
 
+def simplify_geometry(geom, tolerance: Optional[float]):
+    """Pure geometry step: simplify a shapely geometry if a tolerance is given,
+    otherwise return it unchanged. Kept separate from the ee-glue code below so
+    it's unit-testable without an Earth Engine session.
+
+    Earth Engine rejects a client-side literal (an ee.FeatureCollection built
+    from local geometries, as --aoi-file + --breakdown does) once its payload
+    exceeds 10MB — every polygon's full vertex list gets embedded in every API
+    call that touches it. A detailed admin2/raion layer with a few hundred
+    units can blow past that easily. Since VIIRS itself only resolves to
+    ~500m, simplifying well below that scale won't meaningfully change zonal
+    stats for reasonably-sized units — but very small or thin units could be
+    affected, so this is opt-in via --simplify-tolerance, not automatic.
+    """
+    if tolerance is None or tolerance <= 0:
+        return geom
+    return geom.simplify(tolerance, preserve_topology=True)
+
+
 def resolve_breakdown_collection(
     aoi_file: Optional[str],
     aoi_name: Optional[str],
     breakdown: str,
     unit_name_field: Optional[str],
+    simplify_tolerance: Optional[float] = None,
 ):
     """Return an ee.FeatureCollection of sub-units to break the analysis down by,
     each carrying a 'unit_name' property.
@@ -416,7 +436,10 @@ def resolve_breakdown_collection(
                 f"{unit_name_field!r} not found in {aoi_file} columns: {list(gdf.columns)}"
             )
         features = [
-            ee.Feature(ee.Geometry(row.geometry.__geo_interface__), {"unit_name": row[unit_name_field]})
+            ee.Feature(
+                ee.Geometry(simplify_geometry(row.geometry, simplify_tolerance).__geo_interface__),
+                {"unit_name": row[unit_name_field]},
+            )
             for _, row in gdf.iterrows()
         ]
         return ee.FeatureCollection(features)
@@ -485,6 +508,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Property/column in --aoi-file to label each unit with, when using --breakdown with --aoi-file",
     )
+    p.add_argument(
+        "--simplify-tolerance",
+        type=float,
+        default=None,
+        help=(
+            "Simplify --aoi-file geometries by this many degrees before sending to Earth "
+            "Engine (only used with --breakdown --aoi-file). Needed for detailed admin2/raion "
+            "layers with many units, which can exceed Earth Engine's 10MB request-payload limit "
+            "otherwise. Try 0.001 (~100m) as a starting point if you hit a "
+            "'Request payload size exceeds the limit' error."
+        ),
+    )
     return p
 
 
@@ -522,7 +557,11 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if args.breakdown:
         fc = resolve_breakdown_collection(
-            args.aoi_file, args.aoi_name, args.breakdown, args.unit_name_field
+            args.aoi_file,
+            args.aoi_name,
+            args.breakdown,
+            args.unit_name_field,
+            simplify_tolerance=args.simplify_tolerance,
         )
         unit_count = fc.size().getInfo()
         print(f"Breaking down into {unit_count} {args.breakdown} units.", file=sys.stderr)
