@@ -8,7 +8,7 @@ or just:
 """
 
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -26,6 +26,7 @@ from nightlight_tool import (
     compute_period_over_period_change,
     gaul_unit_name_id_fields,
     list_file_fields,
+    parse_baseline_period,
     parse_period_label,
     qa_flag,
     rename_unit_columns,
@@ -1069,6 +1070,53 @@ def test_parse_period_label_rejects_unknown_freq():
         pass
     else:
         raise AssertionError("expected ValueError for an unsupported freq")
+
+
+# --- parse_baseline_period (--baseline-period, date-or-label fallback) -----
+
+
+def test_parse_baseline_period_accepts_exact_label():
+    # unchanged behavior when the exact period-label format is given
+    p = parse_baseline_period("2021-01", "monthly")
+    assert p == parse_period_label("2021-01", "monthly")
+
+
+def test_parse_baseline_period_accepts_a_plain_date_for_monthly():
+    # the bug report: someone types a full date (like --start/--end)
+    # against a coarser --freq
+    p = parse_baseline_period("2026-01-01", "monthly")
+    assert p.label == "2026-01"
+    assert p.start == date(2026, 1, 1)
+    assert p.end == date(2026, 2, 1)
+
+
+def test_parse_baseline_period_accepts_a_plain_date_for_annual():
+    p = parse_baseline_period("2021-06-15", "annual")
+    assert p.label == "2021"
+    assert p.start == date(2021, 1, 1)
+    assert p.end == date(2022, 1, 1)
+
+
+def test_parse_baseline_period_accepts_a_plain_date_for_weekly():
+    p = parse_baseline_period("2021-02-03", "weekly")
+    assert p.start <= date(2021, 2, 3) < p.end
+    assert p.end - p.start == timedelta(days=7)
+
+
+def test_parse_baseline_period_accepts_a_plain_date_for_daily():
+    # daily already accepted a plain date via parse_period_label -- still
+    # works, and the fallback path never has to run
+    p = parse_baseline_period("2021-02-03", "daily")
+    assert p.label == "2021-02-03"
+
+
+def test_parse_baseline_period_rejects_genuinely_bad_input():
+    try:
+        parse_baseline_period("not-a-date-or-label", "monthly")
+    except ValueError as e:
+        assert "date" in str(e).lower()
+    else:
+        raise AssertionError("expected ValueError for unparseable --baseline-period input")
 
 
 # --- compute_period_over_period_change (--include-change) ------------------

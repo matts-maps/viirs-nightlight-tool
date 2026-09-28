@@ -165,6 +165,35 @@ def parse_period_label(label: str, freq: str) -> Period:
         ) from e
 
 
+def parse_baseline_period(label: str, freq: str) -> Period:
+    """Pure function: turn a --baseline-period value into a fetchable
+    Period, accepting either an exact period label (parse_period_label()'s
+    format, e.g. "2021-01" for monthly) or a plain ISO date (e.g.
+    "2021-01-15") -- in the date case, resolves to whichever period of
+    `freq` that date falls in, via build_periods().
+
+    The date form matters because --start/--end already train people to
+    type a full YYYY-MM-DD date, and typing one here for anything coarser
+    than daily (e.g. "2026-01-01" with --freq monthly) would otherwise
+    fail outright, even though the intent ("that month") is completely
+    unambiguous. Both forms are accepted rather than replacing one with
+    the other, so an existing --baseline-period value someone already has
+    saved in a script keeps working.
+    """
+    try:
+        return parse_period_label(label, freq)
+    except ValueError:
+        pass
+    try:
+        d = date.fromisoformat(label)
+    except ValueError:
+        raise ValueError(
+            f"--baseline-period {label!r} isn't a {freq} period label (e.g. "
+            f"{_PERIOD_LABEL_EXAMPLES[freq]!r}) or a date (YYYY-MM-DD)."
+        )
+    return build_periods(d.isoformat(), (d + timedelta(days=1)).isoformat(), freq)[0]
+
+
 DEFAULT_CHANGE_STAT_COLS = ("mean_radiance", "sum_radiance", "median_radiance")
 
 
@@ -1236,8 +1265,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=(
             "Add <stat>_vs_baseline_abs/<stat>_vs_baseline_pct columns comparing every "
             "row to one fixed reference period (e.g. a pre-war baseline), to --out's "
-            "CSV (and --geo-out, if given). Give it as a period label matching --freq's "
-            "format: '2021-01-15' for daily, '2021-W05' for weekly, '2021-01' for "
+            "CSV (and --geo-out, if given). Give it as a plain date (YYYY-MM-DD) -- the "
+            "period of that date is used -- or a period label matching --freq's format "
+            "directly: '2021-01-15' for daily, '2021-W05' for weekly, '2021-01' for "
             "monthly, '2021' for annual. Doesn't have to fall inside --start/--end -- "
             "it's fetched as one extra period."
         ),
@@ -1640,8 +1670,9 @@ def run_wizard() -> list[str]:
         default=False,
     ):
         baseline_period = _prompt_text(
-            f"Baseline period, as a {freq_options[freq_choice]} period label "
-            f"(e.g. {_PERIOD_LABEL_EXAMPLES[freq_options[freq_choice]]!r})"
+            "Baseline period -- a date (YYYY-MM-DD), or a "
+            f"{freq_options[freq_choice]} period label like "
+            f"{_PERIOD_LABEL_EXAMPLES[freq_options[freq_choice]]!r}"
         ).strip()
         if baseline_period:
             argv += ["--baseline-period", baseline_period]
@@ -1700,8 +1731,8 @@ def build_argv_from_form(fields: dict) -> list[str]:
         geo_out: str -- optional path for a joined spatial output (.geojson or .shp),
             written as one file per period plus one combined file with every period
         include_change: bool -- add <stat>_change_abs/_pct columns vs the previous period
-        baseline_period: str -- period label (matching freq's format) to add
-            <stat>_vs_baseline_abs/_pct columns against
+        baseline_period: str -- a date (YYYY-MM-DD) or a period label (matching
+            freq's format) to add <stat>_vs_baseline_abs/_pct columns against
         chart: bool
         chart_units: str (comma-separated) or list[str] -- only used if chart
             and breakdown_level are both set
@@ -1921,7 +1952,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if args.baseline_period:
         try:
-            baseline_period = parse_period_label(args.baseline_period, args.freq)
+            baseline_period = parse_baseline_period(args.baseline_period, args.freq)
         except ValueError as e:
             print(str(e), file=sys.stderr)
             return 1

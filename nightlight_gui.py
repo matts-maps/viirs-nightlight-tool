@@ -299,11 +299,12 @@ class NightlightGUI:
             frm,
             text=(
                 "Baseline period, optional (e.g. a pre-war baseline)\n"
-                "(period label matching Frequency, e.g. '2021-01' for monthly)"
+                "(pick any date within that period -- e.g. any day in the\n"
+                "month, if Frequency is monthly)"
             ),
         ).grid(row=row, column=0, sticky="w", **pad)
         self.baseline_period = tk.StringVar()
-        ttk.Entry(frm, textvariable=self.baseline_period, width=20).grid(
+        self._make_date_widget(frm, self.baseline_period).grid(
             row=row, column=1, sticky="w", **pad
         )
         row += 1

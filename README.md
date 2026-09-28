@@ -168,7 +168,7 @@ the exact GAUL name instead.
 | `--out` | yes | output CSV path |
 | `--geo-out` | no | optional spatial output path (`.geojson` or `.shp`), joined to the boundary geometry by the unit's unique ID/pcode — one file per period plus one combined file with every period (see below) |
 | `--include-change` | no | add change-vs-previous-period columns to the CSV and `--geo-out` (see below) |
-| `--baseline-period` | no | add change-vs-a-fixed-baseline-period columns to the CSV and `--geo-out`, e.g. `--baseline-period 2021-01` (see below) |
+| `--baseline-period` | no | add change-vs-a-fixed-baseline-period columns to the CSV and `--geo-out` — a date or a period label, e.g. `--baseline-period 2021-06-15` (see below) |
 | `--chart` | no | also write a PNG chart next to the CSV — one line chart for a single AOI, or a small-multiples grid (one mini chart per unit) with `--breakdown` (see below) |
 | `--chart-units` | no | comma-separated exact values from the output's unit-name column to chart, when using `--chart` with `--breakdown` (see below) |
 | `--ee-project` | no | your Earth Engine cloud project ID, if required (see step 2) |
@@ -407,14 +407,19 @@ the same row shape everywhere.
   the previous period in the whole-AOI series otherwise. The first period in
   each series has nothing to diff against, so both columns are blank there.
 
-- **`--baseline-period PERIOD`** adds `<stat>_vs_baseline_abs` and
+- **`--baseline-period VALUE`** adds `<stat>_vs_baseline_abs` and
   `<stat>_vs_baseline_pct`, comparing every row to one fixed reference
   period instead — useful for something like "% change vs a pre-war
   baseline" that doesn't shift as you re-run the tool over new date ranges.
-  Give it as a period label in the same format `--freq` would produce:
-  `2021-01-15` for daily, `2021-W05` for weekly, `2021-01` for monthly,
-  `2021` for annual. It doesn't need to fall inside `--start`/`--end` — the
-  tool fetches it as one extra period, the same way as any other.
+  Give it as **a plain date** (`YYYY-MM-DD`, like `--start`/`--end`) — the
+  tool figures out which period that date falls in for whatever `--freq`
+  is (e.g. `2021-06-15` with `--freq monthly` resolves to `2021-06`) — or,
+  if you already know the exact period-label format, that works directly
+  too: `2021-01-15` for daily, `2021-W05` for weekly, `2021-01` for
+  monthly, `2021` for annual. Either way, it doesn't need to fall inside
+  `--start`/`--end` — the tool fetches it as one extra period, the same
+  way as any other. In the GUI, this is a calendar date picker, same as
+  Start/End date.
 
 You can use either flag alone, or both together:
 
