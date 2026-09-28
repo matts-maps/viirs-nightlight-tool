@@ -171,13 +171,28 @@ class NightlightGUI:
         self.unit_id_combo.grid(row=b_row, column=1, sticky="w", **pad)
         b_row += 1
 
-        ttk.Label(self.breakdown_frame, text="Extra attribute columns\n(ctrl/shift-click for several)").grid(
+        ttk.Label(self.breakdown_frame, text="Extra attribute columns\n(tick any you want)").grid(
             row=b_row, column=0, sticky="nw", **pad
         )
-        self.attributes_listbox = tk.Listbox(
-            self.breakdown_frame, selectmode="extended", height=5, exportselection=False
+        # A checkbox per available column, not a multi-select listbox -- ticking
+        # a box is more discoverable than knowing to ctrl/shift-click. Built as
+        # a scrollable canvas of ttk.Checkbuttons since the column count varies
+        # (a detailed boundary file can carry dozens of properties) and a plain
+        # frame wouldn't scroll.
+        attrs_outer = ttk.Frame(self.breakdown_frame)
+        attrs_outer.grid(row=b_row, column=1, sticky="w", **pad)
+        self.attributes_canvas = tk.Canvas(attrs_outer, height=110, width=260, highlightthickness=0)
+        attrs_scrollbar = ttk.Scrollbar(attrs_outer, orient="vertical", command=self.attributes_canvas.yview)
+        self.attributes_inner = ttk.Frame(self.attributes_canvas)
+        self.attributes_inner.bind(
+            "<Configure>",
+            lambda e: self.attributes_canvas.configure(scrollregion=self.attributes_canvas.bbox("all")),
         )
-        self.attributes_listbox.grid(row=b_row, column=1, sticky="w", **pad)
+        self.attributes_canvas.create_window((0, 0), window=self.attributes_inner, anchor="nw")
+        self.attributes_canvas.configure(yscrollcommand=attrs_scrollbar.set)
+        self.attributes_canvas.pack(side="left", fill="both", expand=True)
+        attrs_scrollbar.pack(side="right", fill="y")
+        self._attribute_vars: dict[str, tk.BooleanVar] = {}
         b_row += 1
 
         ttk.Label(self.breakdown_frame, text="Simplify tolerance, degrees\n(own file only, e.g. 0.001)").grid(
@@ -266,7 +281,7 @@ class NightlightGUI:
         breakdown_on = bool(level)
         is_file = self.aoi_source.get() == "file"
 
-        self.attributes_listbox.configure(state="normal" if breakdown_on else "disabled")
+        self._set_attribute_checkboxes_state(breakdown_on)
         self.load_fields_button.configure(state="normal" if breakdown_on else "disabled")
         # "normal" (editable), not "readonly" -- these need to stay typeable
         # even when "Load available columns" hasn't been clicked yet, or
@@ -294,10 +309,23 @@ class NightlightGUI:
             title="Choose boundary file",
             filetypes=[("Boundary files", "*.geojson *.json *.shp *.gdb"), ("All files", "*.*")],
         )
-        if path:
-            self.aoi_file.set(path)
-            self.aoi_source.set("file")
-            self._on_aoi_source_change()
+        if not path:
+            return
+        self.aoi_file.set(path)
+        self.aoi_source.set("file")
+        self._on_aoi_source_change()
+        # Auto-populate the breakdown columns (unit name/ID dropdowns, extra
+        # attribute checkboxes) as soon as a file is chosen, rather than
+        # making choosing a file and then clicking "Load available columns"
+        # two separate steps. Listing a file's columns is just local file IO
+        # (unlike the GAUL lookup below, it needs no admin level or Earth
+        # Engine call), so there's no reason to wait for those.
+        try:
+            fields = list_file_fields(path)
+        except Exception as e:  # noqa: BLE001 -- non-fatal; "Load available columns" remains as a retry
+            messagebox.showerror("Load columns", f"Couldn't read {path}:\n{e}")
+            return
+        self._populate_field_widgets(fields)
 
     def _on_browse_out(self) -> None:
         path = filedialog.asksaveasfilename(
@@ -344,15 +372,27 @@ class NightlightGUI:
     def _populate_field_widgets(self, fields: list[str]) -> None:
         self.unit_name_combo["values"] = fields
         self.unit_id_combo["values"] = fields
-        self.attributes_listbox.delete(0, "end")
+
+        for child in self.attributes_inner.winfo_children():
+            child.destroy()
+        self._attribute_vars = {}
         for f in fields:
-            self.attributes_listbox.insert("end", f)
+            var = tk.BooleanVar(value=False)
+            ttk.Checkbutton(self.attributes_inner, text=f, variable=var).pack(anchor="w")
+            self._attribute_vars[f] = var
+        self._set_attribute_checkboxes_state(bool(self.breakdown_level()))
+        self.attributes_canvas.configure(scrollregion=self.attributes_canvas.bbox("all"))
+
+    def _set_attribute_checkboxes_state(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        for child in self.attributes_inner.winfo_children():
+            child.configure(state=state)
 
     # ------------------------------------------------------------------
     # Collecting form values -> the pure argv-building function
     # ------------------------------------------------------------------
     def _collect_fields(self) -> dict:
-        selected_attrs = [self.attributes_listbox.get(i) for i in self.attributes_listbox.curselection()]
+        selected_attrs = [name for name, var in self._attribute_vars.items() if var.get()]
         return {
             "aoi_source": self.aoi_source.get(),
             "aoi_iso3": self.aoi_iso3.get(),

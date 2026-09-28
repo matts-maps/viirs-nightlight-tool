@@ -109,9 +109,11 @@ your choices into a form instead of prompts, then runs the query in a
 background thread so the window doesn't freeze while Earth Engine works,
 streaming progress into the log panel at the bottom. Choosing your own
 boundary file unlocks Admin 3–5 granularity and the unit-name/unit-ID/simplify
-fields, same as in the wizard; a "Load available columns" button reads the
-file (or looks up FAO GAUL's fields) and fills in dropdowns so you don't have
-to retype column names by hand.
+fields, same as in the wizard; picking a file (or clicking "Load available
+columns" for a GAUL country/name lookup, which needs Earth Engine set up
+already) fills in dropdowns for the unit-name/unit-ID columns and a
+tickable checklist for extra `--attributes` columns, so you don't have to
+retype column names by hand.
 
 When you choose to break down by admin unit, the wizard looks up and prints
 the actual fields available before asking which to include as
