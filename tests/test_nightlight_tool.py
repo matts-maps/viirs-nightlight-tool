@@ -16,13 +16,17 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from nightlight_tool import (
+    _chart_key,
     attach_geometry,
     build_arg_parser,
     build_argv_from_form,
     build_breakdown_row,
     build_periods,
+    compute_baseline_change,
+    compute_period_over_period_change,
     gaul_unit_name_id_fields,
     list_file_fields,
+    parse_period_label,
     qa_flag,
     rename_unit_columns,
     resolve_breakdown_collection,
@@ -999,6 +1003,181 @@ def test_write_geo_outputs_combined_rejects_unsupported_extension(tmp_path):
         assert ".geojson" in str(e) and ".shp" in str(e)
     else:
         raise AssertionError("expected ValueError for an unsupported --geo-out extension")
+
+
+# --- parse_period_label (--baseline-period) ---------------------------------
+
+
+def test_parse_period_label_monthly():
+    p = parse_period_label("2021-03", "monthly")
+    assert p.label == "2021-03"
+    assert p.start == date(2021, 3, 1)
+    assert p.end == date(2021, 4, 1)
+
+
+def test_parse_period_label_annual():
+    p = parse_period_label("2021", "annual")
+    assert p.label == "2021"
+    assert p.start == date(2021, 1, 1)
+    assert p.end == date(2022, 1, 1)
+
+
+def test_parse_period_label_daily():
+    p = parse_period_label("2021-03-14", "daily")
+    assert p.label == "2021-03-14"
+    assert p.start == date(2021, 3, 14)
+    assert p.end == date(2021, 3, 15)
+
+
+def test_parse_period_label_weekly():
+    from datetime import timedelta
+
+    p = parse_period_label("2021-W05", "weekly")
+    assert p.label == "2021-W05"
+    assert p.start.isocalendar()[:2] == (2021, 5)
+    assert p.end == p.start + timedelta(days=7)
+
+
+def test_parse_period_label_round_trips_with_build_periods():
+    # Every label build_periods() produces should parse back to the exact
+    # same Period, for every frequency -- that's the whole point of this
+    # function existing (a baseline period fetched the same way as any
+    # other period build_periods() would have produced).
+    for freq, start, end in [
+        ("daily", "2021-03-01", "2021-03-05"),
+        ("weekly", "2021-01-01", "2021-03-01"),
+        ("monthly", "2021-01-01", "2022-01-01"),
+        ("annual", "2019-01-01", "2023-01-01"),
+    ]:
+        for period in build_periods(start, end, freq):
+            assert parse_period_label(period.label, freq) == period
+
+
+def test_parse_period_label_rejects_bad_label():
+    try:
+        parse_period_label("not-a-period", "monthly")
+    except ValueError as e:
+        assert "2021-01" in str(e)  # names the expected format
+    else:
+        raise AssertionError("expected ValueError for a malformed period label")
+
+
+def test_parse_period_label_rejects_unknown_freq():
+    try:
+        parse_period_label("2021-01", "fortnightly")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError for an unsupported freq")
+
+
+# --- compute_period_over_period_change (--include-change) ------------------
+
+
+def test_compute_period_over_period_change_whole_aoi_series():
+    rows = [
+        {"period": "2021-01", "mean_radiance": 10.0, "sum_radiance": 100.0, "median_radiance": 9.0},
+        {"period": "2021-02", "mean_radiance": 12.0, "sum_radiance": 120.0, "median_radiance": 11.0},
+        {"period": "2021-03", "mean_radiance": 6.0, "sum_radiance": 60.0, "median_radiance": 5.0},
+    ]
+    out = compute_period_over_period_change(rows)
+    # first period has nothing to diff against
+    assert out[0]["mean_radiance_change_abs"] is None
+    assert out[0]["mean_radiance_change_pct"] is None
+    # second period vs first: +2.0 absolute, +20% relative
+    assert out[1]["mean_radiance_change_abs"] == 2.0
+    assert out[1]["mean_radiance_change_pct"] == 20.0
+    # third period vs second: -6.0 absolute, -50% relative
+    assert out[2]["mean_radiance_change_abs"] == -6.0
+    assert out[2]["mean_radiance_change_pct"] == -50.0
+    # applies to all three stat columns, not just mean_radiance
+    assert out[1]["sum_radiance_change_abs"] == 20.0
+    assert out[1]["median_radiance_change_abs"] == 2.0
+    # doesn't touch valid_pixel_count/scene_count -- not meaningful to diff
+    assert "valid_pixel_count_change_abs" not in out[1]
+    # original rows untouched
+    assert "mean_radiance_change_abs" not in rows[0]
+
+
+def test_compute_period_over_period_change_groups_by_unit():
+    rows = [
+        {"period": "2021-01", "unit_id": "P1", "mean_radiance": 10.0, "sum_radiance": 100.0, "median_radiance": 10.0},
+        {"period": "2021-01", "unit_id": "P2", "mean_radiance": 20.0, "sum_radiance": 200.0, "median_radiance": 20.0},
+        {"period": "2021-02", "unit_id": "P1", "mean_radiance": 15.0, "sum_radiance": 150.0, "median_radiance": 15.0},
+        {"period": "2021-02", "unit_id": "P2", "mean_radiance": 22.0, "sum_radiance": 220.0, "median_radiance": 22.0},
+    ]
+    out = compute_period_over_period_change(rows, group_key=_chart_key)
+    # both units' first period has nothing to diff against
+    assert out[0]["mean_radiance_change_abs"] is None
+    assert out[1]["mean_radiance_change_abs"] is None
+    # P1's 2021-02 vs its own 2021-01 (not P2's), and vice versa
+    assert out[2]["mean_radiance_change_abs"] == 5.0
+    assert out[3]["mean_radiance_change_abs"] == 2.0
+    # row order is preserved (period-major, as callers build it), not
+    # reordered into per-unit groups
+    assert [r["unit_id"] for r in out] == ["P1", "P2", "P1", "P2"]
+
+
+def test_compute_period_over_period_change_missing_value_is_none():
+    rows = [
+        {"period": "2021-01", "mean_radiance": None, "sum_radiance": None, "median_radiance": None},
+        {"period": "2021-02", "mean_radiance": 10.0, "sum_radiance": 100.0, "median_radiance": 10.0},
+    ]
+    out = compute_period_over_period_change(rows)
+    assert out[1]["mean_radiance_change_abs"] is None
+    assert out[1]["mean_radiance_change_pct"] is None
+
+
+def test_compute_period_over_period_change_zero_previous_gives_no_percent():
+    rows = [
+        {"period": "2021-01", "mean_radiance": 0.0, "sum_radiance": 0.0, "median_radiance": 0.0},
+        {"period": "2021-02", "mean_radiance": 5.0, "sum_radiance": 50.0, "median_radiance": 5.0},
+    ]
+    out = compute_period_over_period_change(rows)
+    assert out[1]["mean_radiance_change_abs"] == 5.0
+    assert out[1]["mean_radiance_change_pct"] is None  # undefined, not a divide-by-zero crash
+
+
+# --- compute_baseline_change (--baseline-period) ----------------------------
+
+
+def test_compute_baseline_change_whole_aoi():
+    baseline_rows = [{"period": "2021-01", "mean_radiance": 10.0, "sum_radiance": 100.0, "median_radiance": 10.0}]
+    rows = [
+        {"period": "2023-06", "mean_radiance": 4.0, "sum_radiance": 40.0, "median_radiance": 4.0},
+        {"period": "2023-07", "mean_radiance": 10.0, "sum_radiance": 100.0, "median_radiance": 10.0},
+    ]
+    out = compute_baseline_change(rows, baseline_rows)
+    assert out[0]["mean_radiance_vs_baseline_abs"] == -6.0
+    assert out[0]["mean_radiance_vs_baseline_pct"] == -60.0
+    assert out[1]["mean_radiance_vs_baseline_abs"] == 0.0
+    assert out[1]["mean_radiance_vs_baseline_pct"] == 0.0
+    # every row in the run compares to the SAME one baseline row, unlike
+    # period-over-period change
+    assert out[0]["mean_radiance_vs_baseline_abs"] != out[1]["mean_radiance_vs_baseline_abs"]
+
+
+def test_compute_baseline_change_groups_by_unit():
+    baseline_rows = [
+        {"period": "2021-01", "unit_id": "P1", "mean_radiance": 10.0, "sum_radiance": 100.0, "median_radiance": 10.0},
+        {"period": "2021-01", "unit_id": "P2", "mean_radiance": 20.0, "sum_radiance": 200.0, "median_radiance": 20.0},
+    ]
+    rows = [
+        {"period": "2023-06", "unit_id": "P1", "mean_radiance": 15.0, "sum_radiance": 150.0, "median_radiance": 15.0},
+        {"period": "2023-06", "unit_id": "P2", "mean_radiance": 18.0, "sum_radiance": 180.0, "median_radiance": 18.0},
+    ]
+    out = compute_baseline_change(rows, baseline_rows, group_key=_chart_key)
+    # P1 vs P1's baseline, P2 vs P2's baseline -- not cross-matched
+    assert out[0]["mean_radiance_vs_baseline_abs"] == 5.0
+    assert out[1]["mean_radiance_vs_baseline_abs"] == -2.0
+
+
+def test_compute_baseline_change_no_matching_baseline_row_is_none():
+    baseline_rows = [{"period": "2021-01", "unit_id": "P1", "mean_radiance": 10.0, "sum_radiance": 100.0, "median_radiance": 10.0}]
+    rows = [{"period": "2023-06", "unit_id": "P2", "mean_radiance": 5.0, "sum_radiance": 50.0, "median_radiance": 5.0}]
+    out = compute_baseline_change(rows, baseline_rows, group_key=_chart_key)
+    assert out[0]["mean_radiance_vs_baseline_abs"] is None
+    assert out[0]["mean_radiance_vs_baseline_pct"] is None
 
 
 if __name__ == "__main__":

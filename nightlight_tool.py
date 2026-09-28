@@ -123,6 +123,137 @@ def build_periods(start: str, end: str, freq: str) -> list[Period]:
     return periods
 
 
+_PERIOD_LABEL_EXAMPLES = {
+    "daily": "2021-01-15",
+    "weekly": "2021-W05",
+    "monthly": "2021-01",
+    "annual": "2021",
+}
+
+
+def parse_period_label(label: str, freq: str) -> Period:
+    """Pure function: the inverse of build_periods() -- given one period
+    label in the same format build_periods() would have produced for
+    `freq` (e.g. "2021-01" for monthly, "2021" for annual, "2021-W05" for
+    weekly, "2021-01-15" for daily), reconstruct the matching Period
+    (start/end dates). Used for --baseline-period, so a baseline period
+    doesn't have to be one of the periods --start/--end already covers --
+    it's fetched as one extra period in its own right, the same way as any
+    other. Raises ValueError on a label that doesn't match `freq`'s format.
+    """
+    if freq not in VALID_FREQS:
+        raise ValueError(f"freq must be one of {VALID_FREQS}, got {freq!r}")
+    try:
+        if freq == "daily":
+            start_d = date.fromisoformat(label)
+            return Period(label, start_d, start_d + timedelta(days=1))
+        if freq == "monthly":
+            year_s, month_s = label.split("-")
+            start_d = date(int(year_s), int(month_s), 1)
+            return Period(label, start_d, _month_add(start_d, 1))
+        if freq == "annual":
+            start_d = date(int(label), 1, 1)
+            return Period(label, start_d, date(start_d.year + 1, 1, 1))
+        # weekly
+        year_s, week_s = label.split("-W")
+        start_d = date.fromisocalendar(int(year_s), int(week_s), 1)
+        return Period(label, start_d, start_d + timedelta(days=7))
+    except (ValueError, IndexError) as e:
+        raise ValueError(
+            f"--baseline-period {label!r} doesn't look like a {freq} period label "
+            f"(expected e.g. {_PERIOD_LABEL_EXAMPLES[freq]!r}): {e}"
+        ) from e
+
+
+DEFAULT_CHANGE_STAT_COLS = ("mean_radiance", "sum_radiance", "median_radiance")
+
+
+def _stat_diff(current, previous):
+    """Pure helper: (absolute, percent) change from `previous` to `current`.
+    Either value missing -> (None, None). `previous` is zero -> (absolute
+    change, None), since percent change from zero is undefined.
+    """
+    if current is None or previous is None:
+        return None, None
+    abs_change = current - previous
+    pct_change = (abs_change / previous) * 100 if previous != 0 else None
+    return abs_change, pct_change
+
+
+def compute_period_over_period_change(
+    rows: list[dict],
+    stat_cols: tuple[str, ...] = DEFAULT_CHANGE_STAT_COLS,
+    group_key=None,
+) -> list[dict]:
+    """Pure function (--include-change): return a copy of `rows` with
+    "<stat>_change_abs"/"<stat>_change_pct" columns added for each of
+    `stat_cols`, comparing each row to the row immediately before it
+    *within its own group*, in the order rows already appear (callers
+    build rows one period at a time, so a group's rows are already in
+    period order).
+
+    `group_key(row) -> hashable` identifies which series a row belongs to
+    -- pass `_chart_key` for a --breakdown run (groups by unit), or leave
+    as None to treat every row as one series (a whole-AOI run). The first
+    row in each group's series has nothing to diff against, so both new
+    columns are None there.
+
+    Doesn't touch `ee` -- pure list/dict manipulation -- so it's testable
+    offline like every other row-shaping helper here.
+    """
+    previous_by_group: dict = {}
+    out = []
+    for row in rows:
+        key = group_key(row) if group_key else None
+        previous = previous_by_group.get(key)
+        new_row = dict(row)
+        for stat in stat_cols:
+            abs_change, pct_change = _stat_diff(
+                row.get(stat), previous.get(stat) if previous else None
+            )
+            new_row[f"{stat}_change_abs"] = abs_change
+            new_row[f"{stat}_change_pct"] = pct_change
+        out.append(new_row)
+        previous_by_group[key] = row
+    return out
+
+
+def compute_baseline_change(
+    rows: list[dict],
+    baseline_rows: list[dict],
+    stat_cols: tuple[str, ...] = DEFAULT_CHANGE_STAT_COLS,
+    group_key=None,
+) -> list[dict]:
+    """Pure function (--baseline-period): return a copy of `rows` with
+    "<stat>_vs_baseline_abs"/"<stat>_vs_baseline_pct" columns added for
+    each of `stat_cols`, comparing each row to its group's one row in
+    `baseline_rows` (the baseline period, fetched once, the same way as
+    every other period -- see fetch_period_stats/fetch_period_breakdown_stats).
+    A row whose group has no matching baseline row gets None for both new
+    columns (shouldn't normally happen, since the baseline is fetched for
+    every group the same way).
+
+    Doesn't touch `ee`, same as compute_period_over_period_change.
+    """
+    baseline_by_group = {}
+    for brow in baseline_rows:
+        key = group_key(brow) if group_key else None
+        baseline_by_group[key] = brow
+
+    out = []
+    for row in rows:
+        key = group_key(row) if group_key else None
+        baseline_row = baseline_by_group.get(key)
+        new_row = dict(row)
+        for stat in stat_cols:
+            base_val = baseline_row.get(stat) if baseline_row else None
+            abs_change, pct_change = _stat_diff(row.get(stat), base_val)
+            new_row[f"{stat}_vs_baseline_abs"] = abs_change
+            new_row[f"{stat}_vs_baseline_pct"] = pct_change
+        out.append(new_row)
+    return out
+
+
 def _get_stat(feature_properties: dict, band: str, stat: str):
     """Look up one reducer output, tolerant of two different Earth Engine naming
     conventions we've observed in practice: `Image.reduceRegion` (single AOI)
@@ -1088,6 +1219,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
+        "--include-change",
+        action="store_true",
+        help=(
+            "Add <stat>_change_abs/<stat>_change_pct columns (for mean_radiance, "
+            "sum_radiance, median_radiance) to --out's CSV (and --geo-out, if given), "
+            "comparing each row to the immediately previous period in its series -- "
+            "blank for the first period, since there's nothing before it. With "
+            "--breakdown, 'series' means per unit; without it, the whole AOI's one "
+            "time series."
+        ),
+    )
+    p.add_argument(
+        "--baseline-period",
+        default=None,
+        help=(
+            "Add <stat>_vs_baseline_abs/<stat>_vs_baseline_pct columns comparing every "
+            "row to one fixed reference period (e.g. a pre-war baseline), to --out's "
+            "CSV (and --geo-out, if given). Give it as a period label matching --freq's "
+            "format: '2021-01-15' for daily, '2021-W05' for weekly, '2021-01' for "
+            "monthly, '2021' for annual. Doesn't have to fall inside --start/--end -- "
+            "it's fetched as one extra period."
+        ),
+    )
+    p.add_argument(
         "--chart",
         action="store_true",
         help=(
@@ -1475,6 +1630,22 @@ def run_wizard() -> list[str]:
         if geo_out:
             argv += ["--geo-out", geo_out]
 
+    if _prompt_yes_no(
+        "Add change-vs-previous-period columns (per unit if --breakdown)?", default=False
+    ):
+        argv.append("--include-change")
+
+    if _prompt_yes_no(
+        "Add change-vs-a-fixed-baseline-period columns (e.g. a pre-war baseline)?",
+        default=False,
+    ):
+        baseline_period = _prompt_text(
+            f"Baseline period, as a {freq_options[freq_choice]} period label "
+            f"(e.g. {_PERIOD_LABEL_EXAMPLES[freq_options[freq_choice]]!r})"
+        ).strip()
+        if baseline_period:
+            argv += ["--baseline-period", baseline_period]
+
     if breakdown_choice == 0:
         if _prompt_yes_no("Also write a chart PNG next to the CSV?", default=True):
             argv.append("--chart")
@@ -1528,6 +1699,9 @@ def build_argv_from_form(fields: dict) -> list[str]:
         out: str, output CSV path (required)
         geo_out: str -- optional path for a joined spatial output (.geojson or .shp),
             written as one file per period plus one combined file with every period
+        include_change: bool -- add <stat>_change_abs/_pct columns vs the previous period
+        baseline_period: str -- period label (matching freq's format) to add
+            <stat>_vs_baseline_abs/_pct columns against
         chart: bool
         chart_units: str (comma-separated) or list[str] -- only used if chart
             and breakdown_level are both set
@@ -1620,6 +1794,13 @@ def build_argv_from_form(fields: dict) -> list[str]:
     geo_out = (fields.get("geo_out") or "").strip()
     if geo_out:
         argv += ["--geo-out", geo_out]
+
+    if fields.get("include_change"):
+        argv.append("--include-change")
+
+    baseline_period = (fields.get("baseline_period") or "").strip()
+    if baseline_period:
+        argv += ["--baseline-period", baseline_period]
 
     if fields.get("chart"):
         argv.append("--chart")
@@ -1732,6 +1913,26 @@ def main(argv: Optional[list[str]] = None) -> int:
         for i, period in enumerate(periods, 1):
             print(f"[{i}/{len(periods)}] {period.label} ...", file=sys.stderr)
             rows.append(fetch_period_stats(args.freq, aoi_geom, period))
+
+    change_group_key = _chart_key if args.breakdown else None
+
+    if args.include_change:
+        rows = compute_period_over_period_change(rows, group_key=change_group_key)
+
+    if args.baseline_period:
+        try:
+            baseline_period = parse_period_label(args.baseline_period, args.freq)
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
+            return 1
+        print(f"Fetching baseline period {baseline_period.label} ...", file=sys.stderr)
+        if args.breakdown:
+            baseline_rows = fetch_period_breakdown_stats(
+                args.freq, fc, baseline_period, attribute_fields=attribute_fields
+            )
+        else:
+            baseline_rows = [fetch_period_stats(args.freq, aoi_geom, baseline_period)]
+        rows = compute_baseline_change(rows, baseline_rows, group_key=change_group_key)
 
     out_path = Path(args.out)
     csv_rows = (
