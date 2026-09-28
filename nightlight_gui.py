@@ -51,11 +51,6 @@ ADMIN_LEVEL_LABELS = [
 ]
 GAUL_ADMIN_LEVEL_LABELS = ADMIN_LEVEL_LABELS[:3]  # FAO GAUL only goes to admin2
 
-# Floor for the shared label-column width computed in _build_widgets() (see
-# there for why it's computed rather than just hardcoded) -- only matters if
-# every label turns out to be unexpectedly short.
-FIELD_LABEL_MINSIZE = 300
-
 
 class _QueueWriter:
     """A minimal, thread-safe, file-like object that pushes writes onto a
@@ -162,39 +157,48 @@ class NightlightGUI:
         row += 1
 
         # Fields that only matter once a --breakdown granularity is chosen.
-        self.breakdown_frame = ttk.LabelFrame(frm, text="Breakdown options")
-        self.breakdown_frame.grid(row=row, column=0, columnspan=3, sticky="ew", **pad)
+        # These used to sit in their own nested ttk.LabelFrame, which keeps
+        # its own independent grid -- no matter how carefully its column
+        # widths are matched to the outer form's, a LabelFrame's own
+        # border/title-area inset still throws the two grids' absolute
+        # screen positions out of alignment by a few pixels. Laid out
+        # directly in the outer form's own single grid instead (same
+        # pattern as "Area of interest" above), so there's only ever one
+        # grid to keep aligned, with a bold header label standing in for
+        # the box.
+        ttk.Separator(frm, orient="horizontal").grid(row=row, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        row += 1
+        ttk.Label(frm, text="Breakdown options", font=("", 10, "bold")).grid(
+            row=row, column=0, columnspan=3, sticky="w", **pad
+        )
         row += 1
 
-        b_row = 0
-        ttk.Label(self.breakdown_frame, text="Unit name column").grid(row=b_row, column=0, sticky="w", **pad)
+        ttk.Label(frm, text="Unit name column").grid(row=row, column=0, sticky="w", **pad)
         self.unit_name_field = tk.StringVar()
         self.unit_name_combo = ttk.Combobox(
-            self.breakdown_frame, textvariable=self.unit_name_field, width=28, state="disabled"
+            frm, textvariable=self.unit_name_field, width=28, state="disabled"
         )
-        self.unit_name_combo.grid(row=b_row, column=1, sticky="w", **pad)
-        b_row += 1
+        self.unit_name_combo.grid(row=row, column=1, sticky="w", **pad)
+        row += 1
 
-        ttk.Label(self.breakdown_frame, text="Unique ID column (pcode, recommended)").grid(
-            row=b_row, column=0, sticky="w", **pad
-        )
+        ttk.Label(frm, text="Unique ID column (pcode, recommended)").grid(row=row, column=0, sticky="w", **pad)
         self.unit_id_field = tk.StringVar()
         self.unit_id_combo = ttk.Combobox(
-            self.breakdown_frame, textvariable=self.unit_id_field, width=28, state="disabled"
+            frm, textvariable=self.unit_id_field, width=28, state="disabled"
         )
-        self.unit_id_combo.grid(row=b_row, column=1, sticky="w", **pad)
-        b_row += 1
+        self.unit_id_combo.grid(row=row, column=1, sticky="w", **pad)
+        row += 1
 
-        ttk.Label(self.breakdown_frame, text="Extra attribute columns\n(tick any you want)").grid(
-            row=b_row, column=0, sticky="nw", **pad
+        ttk.Label(frm, text="Extra attribute columns\n(tick any you want)").grid(
+            row=row, column=0, sticky="nw", **pad
         )
         # A checkbox per available column, not a multi-select listbox -- ticking
         # a box is more discoverable than knowing to ctrl/shift-click. Built as
         # a scrollable canvas of ttk.Checkbuttons since the column count varies
         # (a detailed boundary file can carry dozens of properties) and a plain
         # frame wouldn't scroll.
-        attrs_outer = ttk.Frame(self.breakdown_frame)
-        attrs_outer.grid(row=b_row, column=1, sticky="w", **pad)
+        attrs_outer = ttk.Frame(frm)
+        attrs_outer.grid(row=row, column=1, sticky="w", **pad)
         # Plain tk widgets (not ttk) below, because ttk widgets use themed
         # styles and ignore a simple bg= override -- we need a real, solid
         # white behind the whole scrollable checkbox panel.
@@ -214,20 +218,19 @@ class NightlightGUI:
         self._attribute_vars: dict[str, tk.BooleanVar] = {}
         self._bind_mousewheel(self.attributes_canvas)
         self._bind_mousewheel(self.attributes_inner)
-        b_row += 1
+        row += 1
 
-        ttk.Label(self.breakdown_frame, text="Simplify tolerance, degrees\n(own file only, e.g. 0.001)").grid(
-            row=b_row, column=0, sticky="w", **pad
+        ttk.Label(frm, text="Simplify tolerance, degrees\n(own file only, e.g. 0.001)").grid(
+            row=row, column=0, sticky="w", **pad
         )
         self.simplify_tolerance = tk.StringVar()
-        self.simplify_entry = ttk.Entry(self.breakdown_frame, textvariable=self.simplify_tolerance, width=10)
-        self.simplify_entry.grid(row=b_row, column=1, sticky="w", **pad)
-        b_row += 1
+        self.simplify_entry = ttk.Entry(frm, textvariable=self.simplify_tolerance, width=10)
+        self.simplify_entry.grid(row=row, column=1, sticky="w", **pad)
+        row += 1
 
-        self.load_fields_button = ttk.Button(
-            self.breakdown_frame, text="Load available columns", command=self._on_load_fields
-        )
-        self.load_fields_button.grid(row=b_row, column=0, columnspan=2, sticky="w", **pad)
+        self.load_fields_button = ttk.Button(frm, text="Load available columns", command=self._on_load_fields)
+        self.load_fields_button.grid(row=row, column=0, columnspan=2, sticky="w", **pad)
+        row += 1
 
         ttk.Separator(frm, orient="horizontal").grid(row=row, column=0, columnspan=3, sticky="ew", pady=8)
         row += 1
@@ -286,23 +289,6 @@ class NightlightGUI:
         self.log = tk.Text(frm, height=14, width=100, state="disabled")
         self.log.grid(row=row, column=0, columnspan=3, sticky="nsew", **pad)
         frm.rowconfigure(row, weight=1)
-
-        # Align the nested "Breakdown options" box's label column with the
-        # rest of the form. A ttk.LabelFrame keeps its own, independent
-        # grid, so its column 0 auto-sizes to its own (shorter) labels
-        # regardless of how wide the outer form's column 0 ends up -- a
-        # fixed guess at the right width would drift out of sync the moment
-        # a label's wording changes. Instead, measure the widest
-        # single-column label actually rendered in either grid, once all of
-        # them exist, and pin both columns to that width.
-        frm.update_idletasks()
-        label_col_width = FIELD_LABEL_MINSIZE
-        for container in (frm, self.breakdown_frame):
-            for child in container.grid_slaves(column=0):
-                if int(child.grid_info().get("columnspan", 1)) == 1:
-                    label_col_width = max(label_col_width, child.winfo_reqwidth())
-        frm.columnconfigure(0, minsize=label_col_width)
-        self.breakdown_frame.columnconfigure(0, minsize=label_col_width)
 
     def _make_date_widget(self, parent: tk.Widget, variable: tk.StringVar) -> tk.Widget:
         """A start/end date field, as a real calendar picker when tkcalendar
