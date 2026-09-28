@@ -986,16 +986,31 @@ def _prompt_field_list(label: str, available_fields: Optional[list[str]]) -> str
     known, validates every comma-separated entry against it and re-prompts
     (listing which ones didn't match) rather than passing bad names through
     to fail later.
+
+    On a bad entry, the retry prompt is pre-filled with just the valid names
+    from the rejected attempt (as its default), so fixing one typo in a long
+    comma list doesn't mean retyping the whole thing from scratch -- pressing
+    Enter accepts the trimmed list, or the user can type a fresh full list.
+    Without this, a single mistyped name in a six-column request would
+    otherwise tempt the user into re-entering a short list "for now" and
+    silently losing the columns they actually wanted.
     """
+    default = ""
     while True:
-        val = _prompt_text(label, default="")
+        val = _prompt_text(label, default=default)
         if not val.strip() or not available_fields:
             return val
         requested = [f.strip() for f in val.split(",") if f.strip()]
         unknown = [f for f in requested if f not in available_fields]
         if not unknown:
             return val
-        print(f"  {unknown} not found in the columns/fields listed above -- try again.")
+        known = [f for f in requested if f not in unknown]
+        default = ", ".join(known)
+        print(
+            f"  {unknown} not found in the columns/fields listed above -- try again "
+            f"(the rest looked fine -- press Enter to keep just {default or 'none'}, "
+            "or type the full corrected list)."
+        )
 
 
 def list_file_fields(aoi_file: str) -> list[str]:

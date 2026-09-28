@@ -510,6 +510,43 @@ def test_select_breakdown_chart_units_filter_by_name_returns_all_matching_ids():
     assert units == ["A1", "A2"]
 
 
+def test_prompt_field_list_retry_prefills_valid_names_not_full_retype():
+    # Regression test: a real user typed a 6-field list with one typo
+    # ("admn0_pcode"), got told to try again, and then -- since the retry
+    # prompt gave no hint of what to keep -- retyped only 2 fields, silently
+    # dropping the 4 he actually wanted. The retry should instead default to
+    # the fields that *did* validate, so pressing Enter keeps them.
+    import builtins
+
+    import nightlight_tool as nt
+
+    responses = iter(
+        [
+            "adm2_name,adm2_pcode, adm1_name, adm1_pcode, adm0_name, admn0_pcode",
+            "",  # accept the pre-filled default on retry
+        ]
+    )
+    prompts_shown = []
+
+    def fake_input(prompt=""):
+        prompts_shown.append(prompt)
+        return next(responses)
+
+    original_input = builtins.input
+    builtins.input = fake_input
+    try:
+        result = nt._prompt_field_list(
+            "Extra attribute columns",
+            ["adm2_name", "adm2_pcode", "adm1_name", "adm1_pcode", "adm0_name", "adm0_pcode"],
+        )
+    finally:
+        builtins.input = original_input
+
+    assert result == "adm2_name, adm2_pcode, adm1_name, adm1_pcode, adm0_name"
+    # the retry prompt should show the valid fields as its default, not be blank
+    assert "adm2_name, adm2_pcode, adm1_name, adm1_pcode, adm0_name" in prompts_shown[1]
+
+
 def test_select_breakdown_chart_units_falls_back_to_name_without_unit_id():
     # No unit_id at all (older runs, or --aoi-file without --unit-id-field)
     # -- behaviour is unchanged from before: group/dedupe by name.
