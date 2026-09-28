@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from nightlight_tool import (
     build_breakdown_row,
     build_periods,
+    list_file_fields,
     qa_flag,
     simplify_geometry,
     summarize_pixels,
@@ -284,6 +285,16 @@ def pytest_approx(value, rel):
             return abs(other - value) <= abs(value) * rel
 
     return _Approx()
+
+
+def test_list_file_fields_excludes_geometry():
+    # sample_aoi/toy_bbox.geojson has properties "name" and "note" -- this is
+    # what the wizard shows the user before asking which column names each
+    # unit or which fields to include as --attributes.
+    fields = list_file_fields(str(Path(__file__).resolve().parent.parent / "sample_aoi" / "toy_bbox.geojson"))
+    assert "geometry" not in fields
+    assert "name" in fields
+    assert "note" in fields
 
 
 def test_write_csv_rejects_empty(tmp_path):

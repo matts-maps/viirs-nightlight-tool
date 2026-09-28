@@ -646,6 +646,42 @@ def _prompt_yes_no(label: str, default: bool = True) -> bool:
     return val.startswith("y")
 
 
+def list_file_fields(aoi_file: str) -> list[str]:
+    """Return the non-geometry column names in a boundary file, for showing the
+    wizard user what's actually available before asking them to name a field.
+    Raises whatever geopandas raises on a bad path/format -- callers decide how
+    to handle that (the wizard treats it as "couldn't look it up", not fatal).
+    """
+    import geopandas as gpd
+
+    gdf = gpd.read_file(aoi_file)
+    return [c for c in gdf.columns if c != "geometry"]
+
+
+def list_gaul_fields(aoi_name: str, breakdown: str, ee_project: Optional[str] = None) -> list[str]:
+    """Return the property names on one sample FAO GAUL feature for `aoi_name`
+    at the given breakdown level, for the same reason as list_file_fields above.
+    Initializes Earth Engine itself if needed, since this can run before the
+    rest of the wizard would otherwise trigger that.
+    """
+    import ee
+
+    try:
+        ee.data.getAssetRoots()
+    except Exception:  # noqa: BLE001 -- not yet initialized
+        if ee_project:
+            ee.Initialize(project=ee_project)
+        else:
+            ee.Initialize()
+
+    asset_id = {"admin1": "FAO/GAUL/2015/level1", "admin2": "FAO/GAUL/2015/level2"}[breakdown]
+    fc = ee.FeatureCollection(asset_id).filter(ee.Filter.eq("ADM0_NAME", aoi_name))
+    if fc.size().getInfo() == 0:
+        return []
+    props = fc.first().propertyNames().getInfo()
+    return [p for p in props if p != "system:index"]
+
+
 def run_wizard() -> list[str]:
     """Interactively ask for each option and return the equivalent argv list.
 
@@ -659,6 +695,7 @@ def run_wizard() -> list[str]:
     print("(Ctrl+C at any point to cancel)\n")
 
     argv: list[str] = []
+    ee_project: Optional[str] = None  # asked for once, as soon as it's actually needed
 
     aoi_choice = _prompt_choice(
         "Area of interest",
@@ -668,9 +705,11 @@ def run_wizard() -> list[str]:
         ],
     )
     if aoi_choice == 0:
-        argv += ["--aoi-name", _prompt_text("Country or admin-unit name (e.g. 'Ukraine')")]
+        aoi_name = _prompt_text("Country or admin-unit name (e.g. 'Ukraine')")
+        argv += ["--aoi-name", aoi_name]
     else:
-        argv += ["--aoi-file", _prompt_text("Path to your boundary file")]
+        aoi_file = _prompt_text("Path to your boundary file")
+        argv += ["--aoi-file", aoi_file]
 
     breakdown_choice = _prompt_choice(
         "Granularity",
@@ -681,13 +720,49 @@ def run_wizard() -> list[str]:
         ],
     )
     if breakdown_choice != 0:
-        argv += ["--breakdown", "admin1" if breakdown_choice == 1 else "admin2"]
+        breakdown = "admin1" if breakdown_choice == 1 else "admin2"
+        argv += ["--breakdown", breakdown]
 
         if aoi_choice == 1:
+            available_fields: list[str] = []
+            try:
+                available_fields = list_file_fields(aoi_file)
+            except Exception as e:  # noqa: BLE001
+                print(f"  (Couldn't read {aoi_file} to list its columns: {e})")
+            if available_fields:
+                print(f"\nColumns found in {aoi_file}:")
+                for f in available_fields:
+                    print(f"  - {f}")
+
             argv += [
                 "--unit-name-field",
-                _prompt_text("Column/property in your file that names each unit"),
+                _prompt_text("Which column names each unit"),
             ]
+        else:
+            print(
+                "\nLooking up available fields on FAO GAUL "
+                f"{breakdown} units for {aoi_name!r} ..."
+            )
+            ee_project = _prompt_text(
+                "Earth Engine cloud project ID (blank if your account doesn't need one)",
+                default="",
+            ).strip() or None
+            available_fields = []
+            try:
+                available_fields = list_gaul_fields(aoi_name, breakdown, ee_project)
+            except Exception as e:  # noqa: BLE001
+                print(f"  (Couldn't look up GAUL fields: {e})")
+            if available_fields:
+                print(f"Fields available on GAUL {breakdown} units for {aoi_name!r}:")
+                for f in available_fields:
+                    print(f"  - {f}")
+            else:
+                print(
+                    "  (Couldn't confirm available fields -- common GAUL fields are "
+                    "ADM0_NAME, ADM0_CODE, ADM1_NAME, ADM1_CODE"
+                    + (", ADM2_NAME, ADM2_CODE" if breakdown == "admin2" else "")
+                    + ", STATUS, DISP_AREA)"
+                )
 
         attrs = _prompt_text(
             "Extra attribute columns to include, comma-separated "
@@ -710,11 +785,12 @@ def run_wizard() -> list[str]:
         if _prompt_yes_no("Also write a chart PNG next to the CSV?", default=True):
             argv.append("--chart")
 
-    ee_project = _prompt_text(
-        "Earth Engine cloud project ID (blank if your account doesn't need one)", default=""
-    )
-    if ee_project.strip():
-        argv += ["--ee-project", ee_project.strip()]
+    if ee_project is None:
+        ee_project = _prompt_text(
+            "Earth Engine cloud project ID (blank if your account doesn't need one)", default=""
+        ).strip() or None
+    if ee_project:
+        argv += ["--ee-project", ee_project]
 
     print()
     return argv

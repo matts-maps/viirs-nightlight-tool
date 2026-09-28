@@ -84,6 +84,12 @@ python nightlight_tool.py --wizard
 This is the same code path as the flag-based CLI underneath — the wizard just
 builds the flags for you, so anything documented below applies either way.
 
+When you choose to break down by admin unit, the wizard looks up and prints
+the actual fields available before asking which to include as
+`--attributes` columns — the columns in your file for `--aoi-file`, or the
+GAUL properties (e.g. `ADM0_NAME`, `ADM1_CODE`) for `--aoi-name` (this needs
+Earth Engine set up already, per step 2 above, since it queries GAUL live).
+
 Or by admin-unit name instead of a boundary file (looked up against
 Earth Engine's FAO GAUL admin boundaries, country → admin-1 → admin-2):
 
