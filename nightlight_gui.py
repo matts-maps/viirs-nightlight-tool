@@ -239,7 +239,7 @@ class NightlightGUI:
         ttk.Label(frm, text="Simplify tolerance, degrees\n(own file only, e.g. 0.001)").grid(
             row=row, column=0, sticky="w", **pad
         )
-        self.simplify_tolerance = tk.StringVar()
+        self.simplify_tolerance = tk.StringVar(value="0.001")
         self.simplify_entry = ttk.Entry(frm, textvariable=self.simplify_tolerance, width=10)
         self.simplify_entry.grid(row=row, column=1, sticky="w", **pad)
         row += 1
