@@ -844,6 +844,37 @@ def _prompt_yes_no(label: str, default: bool = True) -> bool:
     return val.startswith("y")
 
 
+def _prompt_single_field(label: str, available_fields: Optional[list[str]]) -> str:
+    """Like _prompt_text, but when `available_fields` is a known, non-empty
+    list (from list_file_fields/list_gaul_fields), re-prompts until the
+    answer is exactly one of them -- catching a typo, or someone pasting a
+    comma-separated list where one field name was expected, right where it
+    happened instead of deep inside a later Earth Engine call.
+    """
+    while True:
+        val = _prompt_text(label)
+        if not available_fields or val in available_fields:
+            return val
+        print(f"  '{val}' isn't one of the columns/fields listed above -- enter exactly one.")
+
+
+def _prompt_field_list(label: str, available_fields: Optional[list[str]]) -> str:
+    """Like _prompt_text with an empty default, but when `available_fields` is
+    known, validates every comma-separated entry against it and re-prompts
+    (listing which ones didn't match) rather than passing bad names through
+    to fail later.
+    """
+    while True:
+        val = _prompt_text(label, default="")
+        if not val.strip() or not available_fields:
+            return val
+        requested = [f.strip() for f in val.split(",") if f.strip()]
+        unknown = [f for f in requested if f not in available_fields]
+        if not unknown:
+            return val
+        print(f"  {unknown} not found in the columns/fields listed above -- try again.")
+
+
 def list_file_fields(aoi_file: str) -> list[str]:
     """Return the non-geometry column names in a boundary file, for showing the
     wizard user what's actually available before asking them to name a field.
@@ -935,7 +966,7 @@ def run_wizard() -> list[str]:
 
             argv += [
                 "--unit-name-field",
-                _prompt_text("Which column names each unit"),
+                _prompt_single_field("Which column names each unit", available_fields),
             ]
         else:  # GAUL-backed, either ISO3 or name
             ee_project = _prompt_text(
@@ -973,10 +1004,10 @@ def run_wizard() -> list[str]:
                     + ", STATUS, DISP_AREA)"
                 )
 
-        attrs = _prompt_text(
+        attrs = _prompt_field_list(
             "Extra attribute columns to include, comma-separated "
             "(blank for defaults -- see README)",
-            default="",
+            available_fields,
         )
         if attrs.strip():
             argv += ["--attributes", attrs.strip()]
