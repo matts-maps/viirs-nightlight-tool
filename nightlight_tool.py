@@ -968,6 +968,33 @@ def run_wizard() -> list[str]:
                 "--unit-name-field",
                 _prompt_single_field("Which column names each unit", available_fields),
             ]
+
+            file_size_mb = None
+            try:
+                file_size_mb = Path(aoi_file).stat().st_size / (1024 * 1024)
+            except OSError:
+                pass
+            tolerance_prompt = (
+                "Simplify geometries by this many degrees before sending to Earth Engine "
+                "(blank to skip; try 0.001 for ~100m if you hit a "
+                "'Request payload size exceeds the limit' error)"
+            )
+            if file_size_mb and file_size_mb > 2:
+                print(
+                    f"\n{aoi_file} is {file_size_mb:.1f} MB -- a detailed boundary file this "
+                    "size can exceed Earth Engine's 10MB request-payload limit once every "
+                    "unit's full geometry is sent as part of a --breakdown query."
+                )
+            while True:
+                tolerance = _prompt_text(tolerance_prompt, default="").strip()
+                if not tolerance:
+                    break
+                try:
+                    float(tolerance)
+                    argv += ["--simplify-tolerance", tolerance]
+                    break
+                except ValueError:
+                    print(f"  '{tolerance}' isn't a number -- enter a decimal-degree value or leave blank.")
         else:  # GAUL-backed, either ISO3 or name
             ee_project = _prompt_text(
                 "Earth Engine cloud project ID (blank if your account doesn't need one)",
