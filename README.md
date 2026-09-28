@@ -155,7 +155,7 @@ the exact GAUL name instead.
 | `--freq` | yes | `daily`, `weekly`, `monthly`, or `annual` |
 | `--out` | yes | output CSV path |
 | `--chart` | no | also write a PNG chart next to the CSV — one line chart for a single AOI, or a small-multiples grid (one mini chart per unit) with `--breakdown` (see below) |
-| `--chart-units` | no | comma-separated exact `unit_name` values to chart, when using `--chart` with `--breakdown` (see below) |
+| `--chart-units` | no | comma-separated exact values from the output's unit-name column to chart, when using `--chart` with `--breakdown` (see below) |
 | `--ee-project` | no | your Earth Engine cloud project ID, if required (see step 2) |
 | `--breakdown` | no | `admin1`–`admin5` — output one row per sub-unit per period instead of one row per period (see below). With `--aoi-name`/`--aoi-iso3`, only `admin1`/`admin2` are available (that's as far down as FAO GAUL goes); `admin3`–`admin5` need `--aoi-file` |
 | `--unit-name-field` | no | required alongside `--breakdown` when using `--aoi-file` (see below) |
@@ -186,11 +186,13 @@ your own boundary file with `--aoi-file` instead (see below); there the admin
 level you pass is just a label, since every feature in the file is already
 its own unit regardless of which government tier it represents.
 
-Output columns add `unit_name`, `unit_id`, `admin0_name`, `admin1_name`,
+Output columns add the unit's name and ID (named after whichever GAUL field
+actually produced them — `ADM1_NAME`/`ADM1_CODE` for `--breakdown admin1`,
+`ADM2_NAME`/`ADM2_CODE` for `admin2` — filled in automatically, so they're
+always populated with `--aoi-name`), plus `admin0_name`/`admin1_name`/
 `admin2_name` (blank where not applicable) alongside the usual radiance/QA
 columns — so you can pivot or join straight into a spreadsheet or GIS.
-`unit_id` is filled in automatically here from GAUL's own `ADM1_CODE`/
-`ADM2_CODE`, so it's always populated with `--aoi-name`. `--chart` in this mode
+`--chart` in this mode
 writes a small-multiples PNG (one mini chart per unit) instead of a single
 shared chart, since one line per district isn't legible once there are more
 than a handful:
@@ -245,21 +247,24 @@ python nightlight_tool.py --aoi-file crimea_raions.geojson \
     --out crimea_by_raion.csv --breakdown admin2 --ee-project ee-masims
 ```
 
-This adds a `unit_id` column to the output alongside `unit_name`, so you can
-join back onto other datasets (or your GIS layer) by the stable code rather
-than a name that might not match exactly. It's optional but recommended
-whenever names might collide; if you skip it, `unit_id` is just blank. With
-`--aoi-name` (GAUL), you don't need this at all — `unit_id` is filled in for
-you automatically from GAUL's `ADM1_CODE`/`ADM2_CODE`. The interactive
-`--wizard` asks for this right after the unit-name column.
+This adds an ID column to the output alongside the name column — both named
+after the actual column you pointed them at (`raion_pcode` and `raion_name`
+in the example above, not a generic `unit_id`/`unit_name`), so you can join
+back onto other datasets (or your GIS layer) by the stable code rather than a
+name that might not match exactly. It's optional but recommended whenever
+names might collide; if you skip it, the ID column just comes back as
+`unit_id` with every value blank. With `--aoi-name` (GAUL), you don't need
+this at all — the ID column is filled in for you automatically from GAUL's
+`ADM1_CODE`/`ADM2_CODE`, and named accordingly. The interactive `--wizard`
+asks for this right after the unit-name column.
 
 #### Choosing which attributes end up in the output: `--attributes`
 
 By default, `--breakdown` output includes `admin0_name`/`admin1_name`/
-`admin2_name` when using `--aoi-name` (GAUL), and just `unit_name` when using
-`--aoi-file`. That's not always enough — e.g. Venezuela has several municipios
-that share the same name across different states, so `unit_name` alone can't
-tell them apart in the CSV.
+`admin2_name` when using `--aoi-name` (GAUL), and just the unit-name column
+when using `--aoi-file`. That's not always enough — e.g. Venezuela has
+several municipios that share the same name across different states, so the
+unit name alone can't tell them apart in the CSV.
 
 `--attributes` lets you pick exactly which fields from the admin/boundary
 data become columns instead:
@@ -279,8 +284,8 @@ python nightlight_tool.py --aoi-file ven_admin2.geojson --unit-name-field adm2_n
 ```
 
 When `--attributes` is given, it fully replaces the default columns — you get
-exactly the fields you named (plus `unit_name`), so include whatever parent
-name/code field disambiguates your units. With `--aoi-file`, an unknown
+exactly the fields you named (plus your unit-name/unit-id columns), so include
+whatever parent name/code field disambiguates your units. With `--aoi-file`, an unknown
 column name fails fast with the list of columns actually in your file; with
 `--aoi-name`, an unrecognised GAUL property name just comes back blank rather
 than erroring (GAUL's property names vary slightly by asset — check a sample
@@ -381,8 +386,8 @@ correctly, before spending an Earth Engine call on a real AOI.
   [fieldmaps.io](https://fieldmaps.io) or [HDX COD](https://data.humdata.org/))
   and `--unit-name-field`, combined with `--simplify-tolerance` if needed
   (see above).
-- Output is tabular (CSV) only, even in `--breakdown` mode — a
-  `unit_name`/`admin1_name`/`admin2_name` column lets you join it back onto a
+- Output is tabular (CSV) only, even in `--breakdown` mode — the unit-name
+  column (plus `admin1_name`/`admin2_name`) lets you join it back onto a
   boundary file yourself, but the tool doesn't write a joined
   shapefile/GeoJSON directly. See Roadmap below.
 

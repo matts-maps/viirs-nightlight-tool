@@ -20,8 +20,10 @@ from nightlight_tool import (
     build_argv_from_form,
     build_breakdown_row,
     build_periods,
+    gaul_unit_name_id_fields,
     list_file_fields,
     qa_flag,
+    rename_unit_columns,
     resolve_breakdown_collection,
     resolve_iso3_candidate_names,
     select_breakdown_chart_units,
@@ -713,6 +715,67 @@ def test_build_argv_from_form_requires_dates_and_out():
             pass
         else:
             raise AssertionError(f"expected ValueError with {missing!r} missing")
+
+
+# ---------------------------------------------------------------------------
+# rename_unit_columns / gaul_unit_name_id_fields -- output columns named
+# after the field that actually identifies each unit, not a generic label.
+# ---------------------------------------------------------------------------
+
+def test_rename_unit_columns_renames_both():
+    rows = [
+        {"period": "2026-01", "unit_name": "Independencia", "unit_id": "VE1301", "mean_radiance": 1.2},
+        {"period": "2026-01", "unit_name": "Sucre", "unit_id": "VE1302", "mean_radiance": 3.4},
+    ]
+    renamed = rename_unit_columns(rows, "adm2_name", "adm2_pcode")
+    assert renamed == [
+        {"period": "2026-01", "adm2_name": "Independencia", "adm2_pcode": "VE1301", "mean_radiance": 1.2},
+        {"period": "2026-01", "adm2_name": "Sucre", "adm2_pcode": "VE1302", "mean_radiance": 3.4},
+    ]
+    # key order preserved -- csv.DictWriter takes its header from this
+    assert list(renamed[0].keys()) == ["period", "adm2_name", "adm2_pcode", "mean_radiance"]
+
+
+def test_rename_unit_columns_leaves_unit_id_when_no_id_field_given():
+    # No --unit-id-field was set, so unit_id has no more specific name to
+    # take -- it should stay 'unit_id', not become e.g. 'None'.
+    rows = [{"period": "2026-01", "unit_name": "Independencia", "unit_id": None, "mean_radiance": 1.2}]
+    renamed = rename_unit_columns(rows, "adm2_name", None)
+    assert renamed == [{"period": "2026-01", "adm2_name": "Independencia", "unit_id": None, "mean_radiance": 1.2}]
+
+
+def test_rename_unit_columns_noop_when_names_are_already_generic():
+    rows = [{"period": "2026-01", "unit_name": "X", "unit_id": "1"}]
+    renamed = rename_unit_columns(rows, "unit_name", "unit_id")
+    assert renamed == rows
+
+
+def test_rename_unit_columns_handles_empty_rows():
+    assert rename_unit_columns([], "adm2_name", "adm2_pcode") == []
+
+
+def test_rename_unit_columns_does_not_mutate_original_rows():
+    # Charting happens on the original rows (with the generic unit_name/
+    # unit_id keys) after the CSV is written -- the rename must not corrupt
+    # them for that later use.
+    rows = [{"period": "2026-01", "unit_name": "Independencia", "unit_id": "VE1301"}]
+    rename_unit_columns(rows, "adm2_name", "adm2_pcode")
+    assert rows == [{"period": "2026-01", "unit_name": "Independencia", "unit_id": "VE1301"}]
+
+
+def test_gaul_unit_name_id_fields_admin1_and_admin2():
+    assert gaul_unit_name_id_fields("admin1") == ("ADM1_NAME", "ADM1_CODE")
+    assert gaul_unit_name_id_fields("admin2") == ("ADM2_NAME", "ADM2_CODE")
+
+
+def test_gaul_unit_name_id_fields_rejects_admin3():
+    try:
+        gaul_unit_name_id_fields("admin3")
+    except ValueError as e:
+        assert "admin3" in str(e)
+        assert "aoi-file" in str(e)
+    else:
+        raise AssertionError("expected ValueError for admin3 (GAUL only goes to admin2)")
 
 
 if __name__ == "__main__":

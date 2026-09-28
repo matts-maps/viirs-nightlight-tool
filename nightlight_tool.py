@@ -640,6 +640,79 @@ def simplify_geometry(geom, tolerance: Optional[float]):
     return geom.simplify(tolerance, preserve_topology=True)
 
 
+GAUL_BREAKDOWN_LEVELS: dict[str, tuple[str, str, str]] = {
+    "admin1": ("FAO/GAUL/2015/level1", "ADM1_NAME", "ADM1_CODE"),
+    "admin2": ("FAO/GAUL/2015/level2", "ADM2_NAME", "ADM2_CODE"),
+}
+
+
+def _unsupported_gaul_level_error(breakdown: str) -> ValueError:
+    return ValueError(
+        f"--breakdown {breakdown} isn't available with --aoi-name/--aoi-iso3 -- "
+        "FAO GAUL 2015 only carries admin1 and admin2 below the country level. "
+        "For finer units (admin3+), supply your own boundary file with --aoi-file "
+        "instead (the admin level there is just a label for the output)."
+    )
+
+
+def gaul_unit_name_id_fields(breakdown: str) -> tuple[str, str]:
+    """Return (name_field, id_field) -- the GAUL property names that back
+    unit_name/unit_id for a given --breakdown level with --aoi-name/--aoi-iso3
+    (e.g. ("ADM1_NAME", "ADM1_CODE") for admin1).
+
+    This is the same lookup resolve_breakdown_collection() uses internally to
+    build the feature collection, exposed separately so main() can also use
+    it -- to name the output CSV's unit_name/unit_id columns after whichever
+    field actually produced them (see rename_unit_columns()) -- without a
+    second, drifting copy of the admin-level table.
+    """
+    if breakdown not in GAUL_BREAKDOWN_LEVELS:
+        raise _unsupported_gaul_level_error(breakdown)
+    _, name_field, id_field = GAUL_BREAKDOWN_LEVELS[breakdown]
+    return name_field, id_field
+
+
+def rename_unit_columns(
+    rows: list[dict], unit_name_column: str, unit_id_column: Optional[str]
+) -> list[dict]:
+    """Pure function: rename the generic 'unit_name'/'unit_id' keys in each
+    row to whichever column actually identifies each unit -- e.g. 'adm2_name'
+    and 'adm2_pcode' for a --unit-name-field/--unit-id-field pair, or
+    'ADM1_NAME'/'ADM1_CODE' for a GAUL admin1 breakdown -- so the CSV header
+    says what the values actually are instead of a generic label.
+
+    This is a presentation-only rename applied right before the CSV is
+    written. Every other part of the tool (charting, --chart-units matching,
+    the wizard/GUI, the rest of build_breakdown_row/fetch_period_breakdown_stats)
+    keeps using the generic 'unit_name'/'unit_id' keys internally -- rows
+    passed in here are a fresh set of dicts, the originals are untouched, so
+    callers that still need the generic keys (e.g. for charting after this
+    is called) keep working from the pre-rename rows.
+
+    unit_id_column of None (or already 'unit_id') leaves the 'unit_id' key
+    as-is -- there's no more specific name to rename it to when no
+    --unit-id-field was given. Key order is preserved, since csv.DictWriter
+    takes its header from the first row's key order.
+    """
+    if not rows:
+        return rows
+    if unit_name_column == "unit_name" and unit_id_column in (None, "unit_id"):
+        return rows  # nothing to rename -- avoid needless copies
+
+    renamed = []
+    for row in rows:
+        new_row = {}
+        for key, value in row.items():
+            if key == "unit_name" and unit_name_column != "unit_name":
+                new_row[unit_name_column] = value
+            elif key == "unit_id" and unit_id_column and unit_id_column != "unit_id":
+                new_row[unit_id_column] = value
+            else:
+                new_row[key] = value
+        renamed.append(new_row)
+    return renamed
+
+
 def resolve_breakdown_collection(
     aoi_file: Optional[str],
     aoi_name: Optional[str],
@@ -676,18 +749,9 @@ def resolve_breakdown_collection(
     import ee
 
     if aoi_name:
-        level_map = {
-            "admin1": ("FAO/GAUL/2015/level1", "ADM1_NAME", "ADM1_CODE"),
-            "admin2": ("FAO/GAUL/2015/level2", "ADM2_NAME", "ADM2_CODE"),
-        }
-        if breakdown not in level_map:
-            raise ValueError(
-                f"--breakdown {breakdown} isn't available with --aoi-name/--aoi-iso3 -- "
-                "FAO GAUL 2015 only carries admin1 and admin2 below the country level. "
-                "For finer units (admin3+), supply your own boundary file with --aoi-file "
-                "instead (the admin level there is just a label for the output)."
-            )
-        asset_id, name_field, id_field = level_map[breakdown]
+        if breakdown not in GAUL_BREAKDOWN_LEVELS:
+            raise _unsupported_gaul_level_error(breakdown)
+        asset_id, name_field, id_field = GAUL_BREAKDOWN_LEVELS[breakdown]
         fc = ee.FeatureCollection(asset_id).filter(ee.Filter.eq("ADM0_NAME", aoi_name))
         count = fc.size().getInfo()
         if count == 0:
@@ -1035,12 +1099,11 @@ def list_gaul_fields(aoi_name: str, breakdown: str, ee_project: Optional[str] = 
 
     _ensure_ee_initialized(ee_project)
 
-    asset_ids = {"admin1": "FAO/GAUL/2015/level1", "admin2": "FAO/GAUL/2015/level2"}
-    if breakdown not in asset_ids:
+    if breakdown not in GAUL_BREAKDOWN_LEVELS:
         raise ValueError(
             f"FAO GAUL doesn't have {breakdown} units -- it only goes down to admin2"
         )
-    asset_id = asset_ids[breakdown]
+    asset_id = GAUL_BREAKDOWN_LEVELS[breakdown][0]
     fc = ee.FeatureCollection(asset_id).filter(ee.Filter.eq("ADM0_NAME", aoi_name))
     if fc.size().getInfo() == 0:
         return []
@@ -1427,6 +1490,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         args.aoi_name = resolved_name
 
     rows = []
+    unit_name_column = "unit_name"
+    unit_id_column: Optional[str] = "unit_id"
 
     if args.breakdown:
         fc = resolve_breakdown_collection(
@@ -1438,6 +1503,16 @@ def main(argv: Optional[list[str]] = None) -> int:
             attribute_fields=attribute_fields,
             unit_id_field=args.unit_id_field,
         )
+        # Output columns should say what they actually are -- the column the
+        # user picked as --unit-name-field/--unit-id-field for a boundary
+        # file, or the GAUL property that filled them in automatically for a
+        # country/name lookup -- rather than a generic 'unit_name'/'unit_id'
+        # label. See rename_unit_columns() for where this is applied.
+        if args.aoi_file:
+            unit_name_column = args.unit_name_field
+            unit_id_column = args.unit_id_field or "unit_id"
+        else:
+            unit_name_column, unit_id_column = gaul_unit_name_id_fields(args.breakdown)
         unit_count = fc.size().getInfo()
         print(f"Breaking down into {unit_count} {args.breakdown} units.", file=sys.stderr)
         for i, period in enumerate(periods, 1):
@@ -1454,7 +1529,10 @@ def main(argv: Optional[list[str]] = None) -> int:
             rows.append(fetch_period_stats(args.freq, aoi_geom, period))
 
     out_path = Path(args.out)
-    write_csv(rows, out_path)
+    csv_rows = (
+        rename_unit_columns(rows, unit_name_column, unit_id_column) if args.breakdown else rows
+    )
+    write_csv(csv_rows, out_path)
     print(f"Wrote {len(rows)} rows to {out_path}")
 
     if args.chart:
