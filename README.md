@@ -45,6 +45,11 @@ source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+Planning to use the point-and-click [GUI](#gui-mode) rather than the command
+line? Install `requirements-gui.txt` instead — it's the CLI's requirements
+plus the GUI's one extra dependency, in a single command — see
+[GUI mode](#gui-mode) below.
+
 ## 2. Authenticate with Google Earth Engine (one-time, per user)
 
 The tool queries Earth Engine directly (no downloads of huge global rasters),
@@ -112,24 +117,30 @@ even on a small/short screen where the full form wouldn't otherwise fit:
 python nightlight_gui.py
 ```
 
-It needs the same environment as the CLI (steps 1–2 above), plus `tkinter`
-itself, which ships with most Python installs but is a separate OS package on
-some Linux distros:
+If you know from the start that you'll be using the GUI, install
+`requirements-gui.txt` instead of `requirements.txt` in step 1 — it pulls in
+everything the CLI needs plus the GUI's calendar-style date picker
+(`tkcalendar`) in one command:
+
+```bash
+pip install -r requirements-gui.txt
+```
+
+(Already installed `requirements.txt` instead? `pip install tkcalendar` adds
+just the one extra package — no need to redo the rest.)
+
+It also needs `tkinter` itself, which ships with most Python installs but is
+a separate OS package on some Linux distros:
 
 ```bash
 sudo apt-get install python3-tk   # Debian/Ubuntu, if `import tkinter` fails
 ```
 
-For calendar-style date pickers on the Start/End date fields, also install
-the optional `tkcalendar` package:
-
-```bash
-pip install tkcalendar
-```
-
-This is GUI-only and intentionally not in `requirements.txt` (the CLI/wizard
-have no GUI dependency to begin with). Without it, the date fields fall back
-to plain typed entry, exactly as before — nothing else changes.
+`tkcalendar` is GUI-only and kept out of the plain `requirements.txt` (the
+CLI/wizard have no GUI dependency to begin with), which is why it's a
+separate `-gui` requirements file rather than folded into the one everyone
+installs. Without it, the date fields fall back to plain typed entry, exactly
+as before — nothing else changes.
 
 Like the wizard, the GUI is a thin front end over the exact same
 `build_arg_parser()`/`main()` path the CLI uses underneath — it just collects

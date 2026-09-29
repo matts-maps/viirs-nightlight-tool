@@ -1,0 +1,7 @@
+# Everything the CLI/wizard needs, plus the GUI's one optional extra
+# (a calendar-style date picker on the Start/End date fields). Installing
+# this instead of plain requirements.txt is the one-command setup for
+# anyone who's going to run nightlight_gui.py -- see README.md's GUI mode
+# section.
+-r requirements.txt
+tkcalendar>=1.6.1
