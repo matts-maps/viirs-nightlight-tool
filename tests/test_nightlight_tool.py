@@ -632,6 +632,26 @@ def test_build_argv_from_form_iso3_needs_no_geoextent():
     assert "--geoextent" not in argv
 
 
+def test_build_argv_from_form_iso3_with_explicit_geoextent_overrides():
+    # The geoextent field is always shown in the GUI, even for --aoi-iso3 --
+    # if the person fills it in there anyway, it should override the
+    # automatic ISO3-derived code rather than being silently dropped.
+    argv = build_argv_from_form(
+        {
+            "aoi_source": "iso3",
+            "aoi_iso3": "UKR",
+            "geoextent": "crm",
+            "start": "2026-01-01",
+            "end": "2026-02-01",
+            "freq": "monthly",
+            "out_dir": "out",
+        }
+    )
+    assert "--geoextent" in argv
+    args = build_arg_parser().parse_args(argv)
+    assert args.geoextent == "crm"
+
+
 def test_build_argv_from_form_non_iso3_requires_geoextent():
     try:
         build_argv_from_form(

@@ -2098,13 +2098,15 @@ def build_argv_from_form(fields: dict) -> list[str]:
         raise ValueError("Choose an output folder.")
     argv += ["--out-dir", out_dir]
 
-    if aoi_source != "iso3":
-        geoextent = (fields.get("geoextent") or "").strip()
-        if not geoextent:
-            raise ValueError(
-                "Enter a geoextent code for output filenames (e.g. 'UKR') -- needed "
-                "when not using an ISO3 country code."
-            )
+    geoextent = (fields.get("geoextent") or "").strip()
+    if aoi_source != "iso3" and not geoextent:
+        raise ValueError(
+            "Enter a geoextent code for output filenames (e.g. 'UKR') -- needed "
+            "when not using an ISO3 country code."
+        )
+    if geoextent:
+        # Optional (and overrides the automatic ISO3 code) when --aoi-iso3
+        # is used; required otherwise -- see resolve_geoextent().
         argv += ["--geoextent", geoextent]
 
     vector_out = fields.get("vector_out")

@@ -39,19 +39,15 @@ def _destroy(root):
     root.destroy()
 
 
-def test_geoextent_field_hidden_for_iso3_by_default():
-    # ISO3 is the default AOI source -- the geoextent field is automatic
-    # from the ISO3 code, so it should start hidden.
+def test_geoextent_field_always_visible():
+    # The geoextent code feeds every output filename -- it's optional (and
+    # overrides the automatic ISO3 code) with --aoi-iso3, required
+    # otherwise, but shown unconditionally either way so it's never a
+    # surprise which filename a run is going to produce.
     root, gui = _make_gui()
     try:
-        assert not gui.geoextent_entry.grid_info()
-    finally:
-        _destroy(root)
+        assert gui.geoextent_entry.grid_info()
 
-
-def test_geoextent_field_shown_for_name_and_file_sources():
-    root, gui = _make_gui()
-    try:
         gui.aoi_source.set("name")
         gui._on_aoi_source_change()
         assert gui.geoextent_entry.grid_info()
@@ -62,44 +58,45 @@ def test_geoextent_field_shown_for_name_and_file_sources():
 
         gui.aoi_source.set("iso3")
         gui._on_aoi_source_change()
-        assert not gui.geoextent_entry.grid_info()
+        assert gui.geoextent_entry.grid_info()
     finally:
         _destroy(root)
 
 
-def test_vector_format_radios_hidden_until_vector_checkbox_checked():
+def test_vector_geojson_and_shapefile_are_mutually_exclusive_checkboxes():
+    # Both are always visible (no gating checkbox), and unlike a Radiobutton
+    # pair, both can be off at once -- ticking one clears the other rather
+    # than forcing a choice.
     root, gui = _make_gui()
     try:
-        assert not gui.vector_format_geojson_rb.grid_info()
-        assert not gui.vector_format_shapefile_rb.grid_info()
+        assert gui.vector_format_geojson_cb.grid_info()
+        assert gui.vector_format_shapefile_cb.grid_info()
 
-        gui.vector_out.set(True)
-        gui._on_vector_out_change()
-        assert gui.vector_format_geojson_rb.grid_info()
-        assert gui.vector_format_shapefile_rb.grid_info()
+        gui.vector_geojson.set(True)
+        gui._on_vector_format_change("geojson")
+        assert gui.vector_shapefile.get() is False
 
-        gui.vector_out.set(False)
-        gui._on_vector_out_change()
-        assert not gui.vector_format_geojson_rb.grid_info()
+        gui.vector_shapefile.set(True)
+        gui._on_vector_format_change("shapefile")
+        assert gui.vector_geojson.get() is False
+
+        gui.vector_shapefile.set(False)
+        assert gui.vector_geojson.get() is False
+        assert gui.vector_shapefile.get() is False
     finally:
         _destroy(root)
 
 
-def test_raster_scale_field_shown_when_either_raster_checkbox_checked():
+def test_raster_scale_field_always_visible_and_defaults_to_300():
     root, gui = _make_gui()
     try:
-        assert not gui.raster_scale_entry.grid_info()
+        assert gui.raster_scale_entry.grid_info()
+        assert gui.raster_scale.get() == "300"
 
         gui.raster_whole_aoi.set(True)
-        gui._on_raster_change()
         assert gui.raster_scale_entry.grid_info()
 
         gui.raster_whole_aoi.set(False)
-        gui._on_raster_change()
-        assert not gui.raster_scale_entry.grid_info()
-
-        gui.raster_yoy.set(True)
-        gui._on_raster_change()
         assert gui.raster_scale_entry.grid_info()
     finally:
         _destroy(root)
@@ -108,7 +105,8 @@ def test_raster_scale_field_shown_when_either_raster_checkbox_checked():
 def test_vector_format_defaults_to_shapefile():
     root, gui = _make_gui()
     try:
-        assert gui.vector_format.get() == "shapefile"
+        assert gui.vector_shapefile.get() is True
+        assert gui.vector_geojson.get() is False
     finally:
         _destroy(root)
 
@@ -143,8 +141,8 @@ def test_collect_fields_reflects_outputs_section():
         gui.start.set("2026-01-01")
         gui.end.set("2026-02-01")
         gui.out_dir.set("out")
-        gui.vector_out.set(True)
-        gui.vector_format.set("shapefile")
+        gui.vector_shapefile.set(True)
+        gui.vector_geojson.set(False)
         gui.raster_whole_aoi.set(True)
         gui.raster_yoy.set(False)
 
@@ -154,7 +152,7 @@ def test_collect_fields_reflects_outputs_section():
         assert fields["raster_whole_aoi"] is True
         assert fields["raster_yoy"] is False
 
-        gui.vector_out.set(False)
+        gui.vector_shapefile.set(False)
         fields = gui._collect_fields()
         assert fields["vector_out"] is None
     finally:

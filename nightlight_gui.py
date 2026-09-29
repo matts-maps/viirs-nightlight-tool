@@ -97,8 +97,6 @@ class NightlightGUI:
 
         self._build_widgets()
         self._on_aoi_source_change()
-        self._on_vector_out_change()
-        self._on_raster_change()
         self._poll_log_queue()
 
     # ------------------------------------------------------------------
@@ -253,6 +251,10 @@ class NightlightGUI:
 
         ttk.Separator(frm, orient="horizontal").grid(row=row, column=0, columnspan=3, sticky="ew", pady=8)
         row += 1
+        ttk.Label(frm, text="Timeframe", font=("", 10, "bold")).grid(
+            row=row, column=0, columnspan=3, sticky="w", **pad
+        )
+        row += 1
 
         ttk.Label(frm, text="Start date (YYYY-MM-DD, inclusive)").grid(row=row, column=0, sticky="w", **pad)
         self.start = tk.StringVar()
@@ -288,7 +290,7 @@ class NightlightGUI:
         row += 1
 
         self.geoextent_label = ttk.Label(
-            frm, text="Geoextent/ISO3 code for output filenames (e.g. 'UKR', 'crm')"
+            frm, text="Geoextent code for output filenames (e.g. 'UKR', 'crm')"
         )
         self.geoextent_label.grid(row=row, column=0, sticky="w", **pad)
         self.geoextent = tk.StringVar()
@@ -323,24 +325,34 @@ class NightlightGUI:
         ).grid(row=row, column=0, columnspan=2, sticky="w", padx=(24, 6), pady=0)
         row += 1
 
-        self.vector_out = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
-            frm,
-            text="Vector",
-            variable=self.vector_out,
-            command=self._on_vector_out_change,
-        ).grid(row=row, column=0, columnspan=2, sticky="w", padx=(24, 6), pady=3)
+        ttk.Label(frm, text="Vector").grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=(24, 6), pady=3
+        )
         row += 1
 
-        self.vector_format = tk.StringVar(value="shapefile")
-        self.vector_format_geojson_rb = ttk.Radiobutton(
-            frm, text="GeoJSON", variable=self.vector_format, value="geojson"
+        # Two independent checkboxes rather than a radio pair, so both can
+        # be left unticked (no vector output at all). Ticking one clears
+        # the other via _on_vector_format_change() -- only one vector
+        # format can actually be produced -- but unlike a Radiobutton
+        # group, neither is forced on.
+        self.vector_geojson = tk.BooleanVar(value=False)
+        self.vector_format_geojson_cb = ttk.Checkbutton(
+            frm,
+            text="GeoJSON",
+            variable=self.vector_geojson,
+            command=lambda: self._on_vector_format_change("geojson"),
         )
-        self.vector_format_geojson_rb.grid(row=row, column=0, sticky="w", padx=(48, 6), pady=0)
-        self.vector_format_shapefile_rb = ttk.Radiobutton(
-            frm, text="Shapefile", variable=self.vector_format, value="shapefile"
+        self.vector_format_geojson_cb.grid(row=row, column=0, columnspan=2, sticky="w", padx=(48, 6), pady=0)
+        row += 1
+
+        self.vector_shapefile = tk.BooleanVar(value=True)
+        self.vector_format_shapefile_cb = ttk.Checkbutton(
+            frm,
+            text="Shapefile",
+            variable=self.vector_shapefile,
+            command=lambda: self._on_vector_format_change("shapefile"),
         )
-        self.vector_format_shapefile_rb.grid(row=row, column=1, sticky="w", pady=0)
+        self.vector_format_shapefile_cb.grid(row=row, column=0, columnspan=2, sticky="w", padx=(48, 6), pady=0)
         row += 1
 
         ttk.Label(frm, text="Raster").grid(
@@ -353,7 +365,6 @@ class NightlightGUI:
             frm,
             text="Year-over-year diff (independent of the CSV's year-over-year columns above)",
             variable=self.raster_yoy,
-            command=self._on_raster_change,
         ).grid(row=row, column=0, columnspan=2, sticky="w", padx=(48, 6), pady=0)
         row += 1
 
@@ -362,13 +373,12 @@ class NightlightGUI:
             frm,
             text="Whole AOI radiance (one GeoTIFF per period)",
             variable=self.raster_whole_aoi,
-            command=self._on_raster_change,
         ).grid(row=row, column=0, columnspan=2, sticky="w", padx=(48, 6), pady=0)
         row += 1
 
         self.raster_scale_label = ttk.Label(frm, text="Raster resolution, meters/pixel")
         self.raster_scale_label.grid(row=row, column=0, sticky="w", padx=(48, 6), pady=3)
-        self.raster_scale = tk.StringVar(value="500")
+        self.raster_scale = tk.StringVar(value="300")
         self.raster_scale_entry = ttk.Entry(frm, textvariable=self.raster_scale, width=10)
         self.raster_scale_entry.grid(row=row, column=1, sticky="w", **pad)
         row += 1
@@ -385,6 +395,13 @@ class NightlightGUI:
         self.chart_units = tk.StringVar()
         ttk.Entry(frm, textvariable=self.chart_units, width=40).grid(
             row=row, column=1, columnspan=2, sticky="w", **pad
+        )
+        row += 1
+
+        ttk.Separator(frm, orient="horizontal").grid(row=row, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        row += 1
+        ttk.Label(frm, text="Earth Engine", font=("", 10, "bold")).grid(
+            row=row, column=0, columnspan=3, sticky="w", **pad
         )
         row += 1
 
@@ -437,37 +454,17 @@ class NightlightGUI:
         if is_gaul and self.granularity.get() not in GAUL_ADMIN_LEVEL_LABELS:
             self.granularity.set(ADMIN_LEVEL_LABELS[0])
         self._on_granularity_change()
-        self._on_geoextent_visibility_change()
 
-    def _on_geoextent_visibility_change(self) -> None:
-        # The geoextent code is needed in every output filename (CSV,
-        # vector, rasters) -- shown and required whenever the AOI isn't an
-        # ISO3 lookup, since --aoi-iso3's code is used automatically then
-        # (see resolve_geoextent()). Same grid()/grid_remove() pattern as
-        # the rest of this form's conditional fields.
-        show_geoextent = self.aoi_source.get() != "iso3"
-        if show_geoextent:
-            self.geoextent_label.grid()
-            self.geoextent_entry.grid()
-        else:
-            self.geoextent_label.grid_remove()
-            self.geoextent_entry.grid_remove()
-
-    def _on_vector_out_change(self) -> None:
-        if self.vector_out.get():
-            self.vector_format_geojson_rb.grid()
-            self.vector_format_shapefile_rb.grid()
-        else:
-            self.vector_format_geojson_rb.grid_remove()
-            self.vector_format_shapefile_rb.grid_remove()
-
-    def _on_raster_change(self) -> None:
-        if self.raster_whole_aoi.get() or self.raster_yoy.get():
-            self.raster_scale_label.grid()
-            self.raster_scale_entry.grid()
-        else:
-            self.raster_scale_label.grid_remove()
-            self.raster_scale_entry.grid_remove()
+    def _on_vector_format_change(self, changed: str) -> None:
+        # GeoJSON and Shapefile are two independent checkboxes rather than a
+        # radio pair, precisely so both can be left unticked (no vector
+        # output). Only one vector format can actually be produced, so
+        # ticking one here clears the other rather than allowing both on
+        # at once.
+        if changed == "geojson" and self.vector_geojson.get():
+            self.vector_shapefile.set(False)
+        elif changed == "shapefile" and self.vector_shapefile.get():
+            self.vector_geojson.set(False)
 
     def _on_granularity_change(self) -> None:
         level = self.breakdown_level()
@@ -660,7 +657,11 @@ class NightlightGUI:
             "freq": self.freq.get(),
             "out_dir": self.out_dir.get(),
             "geoextent": self.geoextent.get(),
-            "vector_out": self.vector_format.get() if self.vector_out.get() else None,
+            "vector_out": (
+                "geojson" if self.vector_geojson.get()
+                else "shapefile" if self.vector_shapefile.get()
+                else None
+            ),
             "include_yoy": self.include_yoy.get(),
             "dark_threshold": self.dark_threshold.get() or None,
             "raster_whole_aoi": self.raster_whole_aoi.get(),

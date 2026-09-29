@@ -95,12 +95,16 @@ builds the flags for you, so anything documented below applies either way.
 
 Prefer forms and dropdowns to a terminal? `nightlight_gui.py` is a Tkinter
 window with the same options as the wizard (AOI source, granularity,
-attribute/unit-ID columns, dates, frequency, Earth Engine project), plus an
-**Outputs** section — a geoextent/ISO3 code, one shared output folder for
-everything, and checkboxes for which outputs to produce (CSV is always on;
-Vector as GeoJSON or Shapefile; Rasters as independent whole-AOI-radiance and
-year-over-year-diff checkboxes; Chart) — a folder-browse dialog and a live
-log panel instead of typed prompts:
+attribute/unit-ID columns), organized into sections: a **Timeframe** section
+(start/end date, frequency, dark-pixel threshold); an **Outputs** section —
+a geoextent code (always shown; automatic from an ISO3 AOI unless you
+override it, required otherwise), one shared output folder for everything,
+and checkboxes for which outputs to produce (CSV is always on; Vector as
+GeoJSON and/or Shapefile checkboxes, both untickable for no vector output;
+Rasters as independent whole-AOI-radiance and year-over-year-diff
+checkboxes, sharing one resolution field; Chart) — and a separate
+**Earth Engine** section for the cloud project ID — plus a folder-browse
+dialog and a live log panel instead of typed prompts:
 
 ```bash
 python nightlight_gui.py
