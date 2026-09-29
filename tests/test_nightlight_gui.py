@@ -39,6 +39,21 @@ def _destroy(root):
     root.destroy()
 
 
+def test_form_is_wrapped_in_a_scrollable_canvas():
+    # The whole form (not just the attribute checkbox panel) is embedded in
+    # a canvas with a scrollbar, so it stays usable on a short screen. Not
+    # a pixel-level scroll check (no real display here), just confirming
+    # the wrapper and its wheel handler are actually wired up.
+    root, gui = _make_gui()
+    try:
+        assert isinstance(gui._outer_canvas, tk.Canvas)
+        assert gui._outer_canvas.grid_info()
+        # Should not raise even off-screen/unmapped.
+        gui._on_root_mousewheel(type("Event", (), {"delta": 120, "num": None})())
+    finally:
+        _destroy(root)
+
+
 def test_geoextent_field_always_visible():
     # The geoextent code feeds every output filename -- it's optional (and
     # overrides the automatic ISO3 code) with --aoi-iso3, required

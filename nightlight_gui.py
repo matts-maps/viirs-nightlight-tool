@@ -85,6 +85,13 @@ class NightlightGUI:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("VIIRS Nightlight Tool")
+        # The form (Area of interest through the log panel) is taller than
+        # a lot of laptop screens, especially with the OS taskbar/dock
+        # eating into usable height. Default to a size that fits most
+        # screens and let the whole thing scroll (see _build_widgets)
+        # rather than assuming the window can just grow to fit everything.
+        self.root.geometry("900x700")
+        self.root.minsize(600, 400)
         self._log_queue: "queue.Queue[str]" = queue.Queue()
         self._worker: Optional[threading.Thread] = None
         self._poll_job: Optional[str] = None
@@ -104,10 +111,44 @@ class NightlightGUI:
     # ------------------------------------------------------------------
     def _build_widgets(self) -> None:
         pad = {"padx": 6, "pady": 3}
-        frm = ttk.Frame(self.root, padding=10)
-        frm.grid(row=0, column=0, sticky="nsew")
+
+        # The whole form lives inside a scrollable canvas rather than
+        # gridded straight into root, so it stays usable on a short/small
+        # screen instead of being clipped or forcing the window bigger than
+        # the screen. Same canvas + scrollbar + inner-frame pattern as the
+        # attribute checkbox panel below (attrs_outer/attributes_canvas),
+        # just wrapping the entire form instead of one field.
+        outer_canvas = tk.Canvas(self.root, highlightthickness=0)
+        outer_scrollbar = ttk.Scrollbar(self.root, orient="vertical", command=outer_canvas.yview)
+        outer_canvas.configure(yscrollcommand=outer_scrollbar.set)
+        outer_canvas.grid(row=0, column=0, sticky="nsew")
+        outer_scrollbar.grid(row=0, column=1, sticky="ns")
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
+        self._outer_canvas = outer_canvas
+
+        frm = ttk.Frame(outer_canvas, padding=10)
+        frm_window = outer_canvas.create_window((0, 0), window=frm, anchor="nw")
+        frm.bind(
+            "<Configure>",
+            lambda e: outer_canvas.configure(scrollregion=outer_canvas.bbox("all")),
+        )
+        # Keep the embedded form's width matched to the canvas's visible
+        # width as the window resizes, so fields don't get clipped on one
+        # side or leave a stray gap on the other -- only the height scrolls.
+        outer_canvas.bind(
+            "<Configure>", lambda e: outer_canvas.itemconfig(frm_window, width=e.width)
+        )
+        # Mouse wheel over the canvas itself (i.e. any part of the form not
+        # already covered by a more specific binding -- see
+        # _on_attributes_mousewheel's "break") scrolls the whole form.
+        # Bound on the root, not just the canvas, because wheel events go
+        # to whichever specific widget is under the cursor (an Entry, a
+        # Checkbutton, ...) and only fall through to a root-level binding
+        # when that widget has no binding of its own.
+        self.root.bind_all("<MouseWheel>", self._on_root_mousewheel)
+        self.root.bind_all("<Button-4>", self._on_root_mousewheel)
+        self.root.bind_all("<Button-5>", self._on_root_mousewheel)
 
         row = 0
         ttk.Label(frm, text="Area of interest", font=("", 10, "bold")).grid(
@@ -628,7 +669,7 @@ class NightlightGUI:
         widget.bind("<Button-4>", self._on_attributes_mousewheel)
         widget.bind("<Button-5>", self._on_attributes_mousewheel)
 
-    def _on_attributes_mousewheel(self, event: "tk.Event") -> None:
+    def _on_attributes_mousewheel(self, event: "tk.Event") -> str:
         if getattr(event, "num", None) == 4:
             delta = -1
         elif getattr(event, "num", None) == 5:
@@ -636,6 +677,25 @@ class NightlightGUI:
         else:
             delta = -1 if event.delta > 0 else 1
         self.attributes_canvas.yview_scroll(delta, "units")
+        # Stop the event here -- otherwise it would also reach the
+        # root-level binding that scrolls the outer form canvas
+        # (_on_root_mousewheel), scrolling both panels from one wheel turn.
+        return "break"
+
+    def _on_root_mousewheel(self, event: "tk.Event") -> None:
+        """Scroll the whole form. Bound on the root (see _build_widgets),
+        so it only fires for wheel events over a widget with no more
+        specific binding of its own -- the attribute checkbox panel's own
+        binding (_on_attributes_mousewheel) takes over, and returns
+        "break", whenever the cursor is over it instead.
+        """
+        if getattr(event, "num", None) == 4:
+            delta = -1
+        elif getattr(event, "num", None) == 5:
+            delta = 1
+        else:
+            delta = -1 if event.delta > 0 else 1
+        self._outer_canvas.yview_scroll(delta, "units")
 
     # ------------------------------------------------------------------
     # Collecting form values -> the pure argv-building function

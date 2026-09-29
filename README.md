@@ -104,7 +104,9 @@ GeoJSON and/or Shapefile checkboxes, both untickable for no vector output;
 Rasters as independent whole-AOI-radiance and year-over-year-diff
 checkboxes, sharing one resolution field; Chart) — and a separate
 **Earth Engine** section for the cloud project ID — plus a folder-browse
-dialog and a live log panel instead of typed prompts:
+dialog and a live log panel instead of typed prompts. The whole window
+scrolls (mouse wheel or the scrollbar on the right), so it stays usable
+even on a small/short screen where the full form wouldn't otherwise fit:
 
 ```bash
 python nightlight_gui.py
