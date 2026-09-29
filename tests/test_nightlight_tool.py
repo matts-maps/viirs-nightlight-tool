@@ -16,17 +16,23 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from nightlight_tool import (
+    DEFAULT_DARK_THRESHOLD_NW,
+    Period,
     attach_geometry,
     build_arg_parser,
     build_argv_from_form,
     build_breakdown_row,
     build_periods,
+    build_raster_filename,
+    compute_year_over_year_change,
     gaul_unit_name_id_fields,
     list_file_fields,
+    parse_period_label,
     qa_flag,
     rename_unit_columns,
     resolve_breakdown_collection,
     resolve_iso3_candidate_names,
+    resolve_raster_geoextent,
     select_breakdown_chart_units,
     shapefile_safe_field_names,
     simplify_geometry,
@@ -35,6 +41,8 @@ from nightlight_tool import (
     write_csv,
     write_geo_outputs_combined,
     write_geo_outputs_per_period,
+    year_ago_period,
+    year_ago_period_label,
 )
 
 
@@ -163,6 +171,7 @@ def test_build_breakdown_row_admin1_ok():
         "avg_rad_sum": 1280.0,
         "avg_rad_median": 1.1,
         "avg_rad_count": 400,
+        "dark_mean": 0.25,
     }
     row = build_breakdown_row("2022-01", "avg_rad", props, scene_count=1)
     assert row["unit_name"] == "Sana'a"
@@ -172,9 +181,24 @@ def test_build_breakdown_row_admin1_ok():
     assert row["mean_radiance"] == 3.2
     assert row["sum_radiance"] == 1280.0
     assert row["median_radiance"] == 1.1
+    assert row["pct_dark"] == 25.0
     assert row["valid_pixel_count"] == 400
     assert row["scene_count"] == 1
     assert row["qa_flag"] == "ok"
+
+
+def test_build_breakdown_row_pct_dark_none_when_not_reduced():
+    props = {
+        "unit_name": "Sana'a",
+        "ADM0_NAME": "Yemen",
+        "ADM1_NAME": "Sana'a",
+        "avg_rad_mean": 3.2,
+        "avg_rad_sum": 1280.0,
+        "avg_rad_median": 1.1,
+        "avg_rad_count": 400,
+    }
+    row = build_breakdown_row("2022-01", "avg_rad", props, scene_count=1)
+    assert row["pct_dark"] is None
 
 
 def test_build_breakdown_row_admin2_carries_parent_name():
@@ -755,6 +779,236 @@ def test_build_argv_from_form_geo_out_omitted_when_blank():
     assert args.geo_out is None
 
 
+def test_build_argv_from_form_include_yoy_included_when_checked():
+    argv = build_argv_from_form(
+        {
+            "aoi_source": "iso3",
+            "aoi_iso3": "UKR",
+            "start": "2026-01-01",
+            "end": "2026-02-01",
+            "freq": "monthly",
+            "out": "o.csv",
+            "include_yoy": True,
+        }
+    )
+    args = build_arg_parser().parse_args(argv)
+    assert args.include_yoy is True
+
+
+def test_build_argv_from_form_include_yoy_omitted_when_unchecked():
+    argv = build_argv_from_form(
+        {
+            "aoi_source": "iso3",
+            "aoi_iso3": "UKR",
+            "start": "2026-01-01",
+            "end": "2026-02-01",
+            "freq": "monthly",
+            "out": "o.csv",
+        }
+    )
+    assert "--include-yoy" not in argv
+    args = build_arg_parser().parse_args(argv)
+    assert args.include_yoy is False
+
+
+def test_build_argv_from_form_dark_threshold_included_when_given():
+    argv = build_argv_from_form(
+        {
+            "aoi_source": "iso3",
+            "aoi_iso3": "UKR",
+            "start": "2026-01-01",
+            "end": "2026-02-01",
+            "freq": "monthly",
+            "out": "o.csv",
+            "dark_threshold": "0.75",
+        }
+    )
+    args = build_arg_parser().parse_args(argv)
+    assert args.dark_threshold == 0.75
+
+
+def test_build_argv_from_form_dark_threshold_omitted_uses_default():
+    argv = build_argv_from_form(
+        {
+            "aoi_source": "iso3",
+            "aoi_iso3": "UKR",
+            "start": "2026-01-01",
+            "end": "2026-02-01",
+            "freq": "monthly",
+            "out": "o.csv",
+        }
+    )
+    assert "--dark-threshold" not in argv
+    args = build_arg_parser().parse_args(argv)
+    assert args.dark_threshold == DEFAULT_DARK_THRESHOLD_NW
+
+
+def test_build_argv_from_form_dark_threshold_rejects_non_number():
+    try:
+        build_argv_from_form(
+            {
+                "aoi_source": "iso3",
+                "aoi_iso3": "UKR",
+                "start": "2026-01-01",
+                "end": "2026-02-01",
+                "freq": "monthly",
+                "out": "o.csv",
+                "dark_threshold": "not-a-number",
+            }
+        )
+    except ValueError as e:
+        assert "number" in str(e)
+    else:
+        raise AssertionError("expected ValueError for a non-numeric dark_threshold")
+
+
+def test_extract_pct_dark_reads_dark_mean():
+    from nightlight_tool import _extract_pct_dark
+
+    assert _extract_pct_dark({"dark_mean": 0.4}) == 40.0
+    assert _extract_pct_dark({}) is None
+
+
+# ---------------------------------------------------------------------------
+# --raster-out: filename building and geoextent resolution
+# ---------------------------------------------------------------------------
+
+
+def test_sanitize_filename_token_replaces_non_alnum_with_underscores():
+    from nightlight_tool import _sanitize_filename_token
+
+    assert _sanitize_filename_token("2026-01") == "2026_01"
+    assert _sanitize_filename_token("2026-W05") == "2026_w05"
+    assert _sanitize_filename_token("UKR") == "ukr"
+    assert _sanitize_filename_token("a -- b  c") == "a_b_c"
+    assert _sanitize_filename_token("__leading and trailing__") == "leading_and_trailing"
+
+
+def test_sanitize_filename_token_empty_input_gives_na():
+    from nightlight_tool import _sanitize_filename_token
+
+    assert _sanitize_filename_token("") == "na"
+    assert _sanitize_filename_token("---") == "na"
+
+
+def test_build_raster_filename_uses_dnc_style_template():
+    assert (
+        build_raster_filename("UKR", "2026-01")
+        == "ukr_evnt_lit_ras_s0_viirs_pp_2026_01.tif"
+    )
+
+
+def test_build_raster_filename_all_underscores_no_hyphens():
+    name = build_raster_filename("crm", "diff_yoy_2026-01_minus_2025-01")
+    assert "-" not in name
+    assert name == "crm_evnt_lit_ras_s0_viirs_pp_diff_yoy_2026_01_minus_2025_01.tif"
+
+
+def test_resolve_raster_geoextent_prefers_iso3():
+    assert resolve_raster_geoextent("UKR", None) == "UKR"
+    assert resolve_raster_geoextent("UKR", "crm") == "UKR"
+
+
+def test_resolve_raster_geoextent_falls_back_to_explicit_flag():
+    assert resolve_raster_geoextent(None, "crm") == "crm"
+
+
+def test_resolve_raster_geoextent_raises_when_neither_given():
+    try:
+        resolve_raster_geoextent(None, None)
+    except ValueError as e:
+        assert "--raster-geoextent" in str(e)
+    else:
+        raise AssertionError("expected ValueError when neither iso3 nor geoextent is given")
+
+
+def test_build_argv_from_form_raster_out_with_iso3_needs_no_geoextent():
+    argv = build_argv_from_form(
+        {
+            "aoi_source": "iso3",
+            "aoi_iso3": "UKR",
+            "start": "2026-01-01",
+            "end": "2026-02-01",
+            "freq": "monthly",
+            "out": "o.csv",
+            "raster_out": True,
+        }
+    )
+    args = build_arg_parser().parse_args(argv)
+    assert args.raster_out is True
+    assert args.raster_geoextent is None
+
+
+def test_build_argv_from_form_raster_out_with_file_requires_geoextent():
+    try:
+        build_argv_from_form(
+            {
+                "aoi_source": "file",
+                "aoi_file": "aoi.geojson",
+                "start": "2026-01-01",
+                "end": "2026-02-01",
+                "freq": "monthly",
+                "out": "o.csv",
+                "raster_out": True,
+            }
+        )
+    except ValueError as e:
+        assert "geoextent" in str(e).lower()
+    else:
+        raise AssertionError("expected ValueError for --raster-out without a geoextent code")
+
+
+def test_build_argv_from_form_raster_out_with_file_and_geoextent_ok():
+    argv = build_argv_from_form(
+        {
+            "aoi_source": "file",
+            "aoi_file": "aoi.geojson",
+            "start": "2026-01-01",
+            "end": "2026-02-01",
+            "freq": "monthly",
+            "out": "o.csv",
+            "raster_out": True,
+            "raster_geoextent": "crm",
+        }
+    )
+    args = build_arg_parser().parse_args(argv)
+    assert args.raster_out is True
+    assert args.raster_geoextent == "crm"
+
+
+def test_build_argv_from_form_raster_out_omitted_by_default():
+    argv = build_argv_from_form(
+        {
+            "aoi_source": "iso3",
+            "aoi_iso3": "UKR",
+            "start": "2026-01-01",
+            "end": "2026-02-01",
+            "freq": "monthly",
+            "out": "o.csv",
+        }
+    )
+    assert "--raster-out" not in argv
+    args = build_arg_parser().parse_args(argv)
+    assert args.raster_out is False
+
+
+def test_build_argv_from_form_raster_scale_included_when_given():
+    argv = build_argv_from_form(
+        {
+            "aoi_source": "iso3",
+            "aoi_iso3": "UKR",
+            "start": "2026-01-01",
+            "end": "2026-02-01",
+            "freq": "monthly",
+            "out": "o.csv",
+            "raster_out": True,
+            "raster_scale": "1000",
+        }
+    )
+    args = build_arg_parser().parse_args(argv)
+    assert args.raster_scale == 1000
+
+
 # ---------------------------------------------------------------------------
 # rename_unit_columns / gaul_unit_name_id_fields -- output columns named
 # after the field that actually identifies each unit, not a generic label.
@@ -999,6 +1253,128 @@ def test_write_geo_outputs_combined_rejects_unsupported_extension(tmp_path):
         assert ".geojson" in str(e) and ".shp" in str(e)
     else:
         raise AssertionError("expected ValueError for an unsupported --geo-out extension")
+
+
+def test_parse_period_label_monthly_roundtrip():
+    for period in build_periods("2021-11-01", "2022-03-01", "monthly"):
+        assert parse_period_label(period.label, "monthly") == period
+
+
+def test_parse_period_label_annual_roundtrip():
+    for period in build_periods("2019-01-01", "2023-01-01", "annual"):
+        assert parse_period_label(period.label, "annual") == period
+
+
+def test_parse_period_label_weekly_roundtrip():
+    for period in build_periods("2022-01-01", "2022-04-01", "weekly"):
+        assert parse_period_label(period.label, "weekly") == period
+
+
+def test_parse_period_label_daily_roundtrip():
+    for period in build_periods("2022-02-25", "2022-03-05", "daily"):
+        assert parse_period_label(period.label, "daily") == period
+
+
+def test_parse_period_label_rejects_wrong_format():
+    try:
+        parse_period_label("not-a-period", "monthly")
+    except ValueError as e:
+        assert "monthly" in str(e)
+    else:
+        raise AssertionError("expected ValueError for an unparseable period label")
+
+
+def test_year_ago_period_monthly():
+    period = parse_period_label("2022-03", "monthly")
+    assert year_ago_period(period, "monthly") == parse_period_label("2021-03", "monthly")
+
+
+def test_year_ago_period_annual():
+    period = parse_period_label("2022", "annual")
+    assert year_ago_period(period, "annual") == parse_period_label("2021", "annual")
+
+
+def test_year_ago_period_daily():
+    period = parse_period_label("2022-03-14", "daily")
+    assert year_ago_period(period, "daily") == parse_period_label("2021-03-14", "daily")
+
+
+def test_year_ago_period_daily_feb29_has_no_match():
+    # 2024 is a leap year (Feb 29 exists); 2023 is not, so there's no
+    # year-ago Feb 29 to compare against.
+    period = parse_period_label("2024-02-29", "daily")
+    assert year_ago_period(period, "daily") is None
+
+
+def test_year_ago_period_weekly():
+    period = parse_period_label("2022-W10", "weekly")
+    assert year_ago_period(period, "weekly") == parse_period_label("2021-W10", "weekly")
+
+
+def test_year_ago_period_weekly_week53_has_no_match():
+    # 2026 has an ISO week 53; 2025 does not, so week 53 has no year-ago match.
+    period = parse_period_label("2026-W53", "weekly")
+    assert year_ago_period(period, "weekly") is None
+
+
+def test_year_ago_period_label_wraps_year_ago_period():
+    assert year_ago_period_label("2022-03", "monthly") == "2021-03"
+    assert year_ago_period_label("2026-W53", "weekly") is None
+    assert year_ago_period_label("garbage", "monthly") is None
+
+
+def test_compute_year_over_year_change_whole_aoi():
+    rows = [
+        {"period": "2021-03", "mean_radiance": 10.0, "sum_radiance": 100.0},
+        {"period": "2022-03", "mean_radiance": 12.0, "sum_radiance": 90.0},
+    ]
+    lookup = {(None, r["period"]): r for r in rows}
+    out = compute_year_over_year_change(rows, "monthly", lookup)
+
+    assert out[0]["mean_radiance_yoy_abs"] is None  # nothing a year before 2021-03 was fetched
+    assert out[0]["mean_radiance_yoy_pct"] is None
+
+    assert out[1]["mean_radiance_yoy_abs"] == 2.0
+    assert round(out[1]["mean_radiance_yoy_pct"], 4) == 20.0
+    assert out[1]["sum_radiance_yoy_abs"] == -10.0
+
+
+def test_compute_year_over_year_change_zero_previous_gives_abs_but_not_pct():
+    rows = [
+        {"period": "2021-03", "mean_radiance": 0.0, "sum_radiance": 0.0},
+        {"period": "2022-03", "mean_radiance": 0.1, "sum_radiance": 5.0},
+    ]
+    lookup = {(None, r["period"]): r for r in rows}
+    out = compute_year_over_year_change(rows, "monthly", lookup)
+    assert out[1]["mean_radiance_yoy_abs"] == 0.1
+    assert out[1]["mean_radiance_yoy_pct"] is None
+
+
+def test_compute_year_over_year_change_respects_group_key():
+    rows = [
+        {"period": "2021-03", "unit_name": "A", "mean_radiance": 5.0},
+        {"period": "2021-03", "unit_name": "B", "mean_radiance": 50.0},
+        {"period": "2022-03", "unit_name": "A", "mean_radiance": 8.0},
+        {"period": "2022-03", "unit_name": "B", "mean_radiance": 40.0},
+    ]
+
+    def group_key(row):
+        return row["unit_name"]
+
+    lookup = {(group_key(r), r["period"]): r for r in rows}
+    out = compute_year_over_year_change(rows, "monthly", lookup, group_key=group_key)
+
+    a_2022 = next(r for r in out if r["unit_name"] == "A" and r["period"] == "2022-03")
+    b_2022 = next(r for r in out if r["unit_name"] == "B" and r["period"] == "2022-03")
+    assert a_2022["mean_radiance_yoy_abs"] == 3.0
+    assert b_2022["mean_radiance_yoy_abs"] == -10.0
+
+
+def test_compute_year_over_year_change_missing_lookup_entry_gives_none():
+    rows = [{"period": "2022-03", "mean_radiance": 12.0}]
+    out = compute_year_over_year_change(rows, "monthly", lookup={})
+    assert out[0]["mean_radiance_yoy_abs"] is None
+    assert out[0]["mean_radiance_yoy_pct"] is None
 
 
 if __name__ == "__main__":

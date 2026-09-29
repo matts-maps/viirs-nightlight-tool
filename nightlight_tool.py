@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import re
 import sys
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -56,6 +57,13 @@ MANDATORY_QF_KEEP = (0, 1)
 # daily/period value to be trusted without a QA flag.
 MIN_VALID_PIXEL_FRACTION = 0.5
 MIN_SCENE_COUNT = 1
+
+# Default --dark-threshold: a pixel below this radiance (nW/cm2/sr) counts as
+# "dark" for the pct_dark column. Not derived from any particular published
+# study -- just a low-but-nonzero cutoff that distinguishes "no detectable
+# lighting" from VIIRS's own noise floor. Override with --dark-threshold if
+# you have a value that matches your own analysis.
+DEFAULT_DARK_THRESHOLD_NW = 0.5
 
 
 @dataclass(frozen=True)
@@ -123,6 +131,205 @@ def build_periods(start: str, end: str, freq: str) -> list[Period]:
     return periods
 
 
+_PERIOD_LABEL_EXAMPLES = {
+    "daily": "2021-01-15",
+    "weekly": "2021-W05",
+    "monthly": "2021-01",
+    "annual": "2021",
+}
+
+
+def parse_period_label(label: str, freq: str) -> Period:
+    """Pure function: the inverse of build_periods() -- given one period
+    label in the same format build_periods() would have produced for
+    `freq` (e.g. "2021-01" for monthly, "2021" for annual, "2021-W05" for
+    weekly, "2021-01-15" for daily), reconstruct the matching Period
+    (start/end dates). Used by year_ago_period_label() to turn a row's
+    'period' string back into dates it can do calendar math on. Raises
+    ValueError on a label that doesn't match `freq`'s format.
+    """
+    if freq not in VALID_FREQS:
+        raise ValueError(f"freq must be one of {VALID_FREQS}, got {freq!r}")
+    try:
+        if freq == "daily":
+            start_d = date.fromisoformat(label)
+            return Period(label, start_d, start_d + timedelta(days=1))
+        if freq == "monthly":
+            year_s, month_s = label.split("-")
+            start_d = date(int(year_s), int(month_s), 1)
+            return Period(label, start_d, _month_add(start_d, 1))
+        if freq == "annual":
+            start_d = date(int(label), 1, 1)
+            return Period(label, start_d, date(start_d.year + 1, 1, 1))
+        # weekly
+        year_s, week_s = label.split("-W")
+        start_d = date.fromisocalendar(int(year_s), int(week_s), 1)
+        return Period(label, start_d, start_d + timedelta(days=7))
+    except (ValueError, IndexError) as e:
+        raise ValueError(
+            f"{label!r} doesn't look like a {freq} period label "
+            f"(expected e.g. {_PERIOD_LABEL_EXAMPLES[freq]!r}): {e}"
+        ) from e
+
+
+def year_ago_period(period: Period, freq: str) -> Optional[Period]:
+    """Pure function (--include-yoy): the Period exactly one year before
+    `period`, at the same point in the calendar/ISO-week cycle -- or None
+    when that period doesn't exist. That's only possible for daily (a
+    Feb 29 has no year-ago Feb 29 in a non-leap year) and weekly (ISO
+    week 53 doesn't occur in every year), so those are skipped rather
+    than approximated.
+    """
+    if freq not in VALID_FREQS:
+        raise ValueError(f"freq must be one of {VALID_FREQS}, got {freq!r}")
+
+    if freq == "daily":
+        try:
+            start_d = date(period.start.year - 1, period.start.month, period.start.day)
+        except ValueError:
+            return None
+        return Period(start_d.isoformat(), start_d, start_d + timedelta(days=1))
+
+    if freq == "monthly":
+        year_s, month_s = period.label.split("-")
+        year, month = int(year_s) - 1, int(month_s)
+        start_d = date(year, month, 1)
+        return Period(f"{year:04d}-{month:02d}", start_d, _month_add(start_d, 1))
+
+    if freq == "annual":
+        year = int(period.label) - 1
+        return Period(f"{year:04d}", date(year, 1, 1), date(year + 1, 1, 1))
+
+    # weekly -- go by the actual ISO calendar of period.start (already
+    # snapped to that week's Monday) rather than string-splitting the
+    # label, so this stays correct regardless of how the label was built.
+    iso_year, iso_week, _ = period.start.isocalendar()
+    try:
+        start_d = date.fromisocalendar(iso_year - 1, iso_week, 1)
+    except ValueError:
+        return None  # this ISO week doesn't exist a year back (e.g. week 53)
+    return Period(f"{iso_year - 1:04d}-W{iso_week:02d}", start_d, start_d + timedelta(days=7))
+
+
+def year_ago_period_label(label: str, freq: str) -> Optional[str]:
+    """Pure function (--include-yoy): the period label exactly one year
+    before `label` (a period label in build_periods()'s format for
+    `freq`), or None when that period doesn't exist (see year_ago_period())
+    or `label` itself doesn't parse.
+    """
+    try:
+        period = parse_period_label(label, freq)
+    except ValueError:
+        return None
+    year_ago = year_ago_period(period, freq)
+    return year_ago.label if year_ago else None
+
+
+DEFAULT_CHANGE_STAT_COLS = ("mean_radiance", "sum_radiance", "median_radiance")
+
+
+def _stat_diff(current, previous):
+    """Pure helper: (absolute, percent) change from `previous` to `current`.
+    Either value missing -> (None, None). `previous` is zero -> (absolute
+    change, None), since percent change from zero is undefined.
+    """
+    if current is None or previous is None:
+        return None, None
+    abs_change = current - previous
+    pct_change = (abs_change / previous) * 100 if previous != 0 else None
+    return abs_change, pct_change
+
+
+def compute_year_over_year_change(
+    rows: list[dict],
+    freq: str,
+    lookup: dict,
+    stat_cols: tuple[str, ...] = DEFAULT_CHANGE_STAT_COLS,
+    group_key=None,
+) -> list[dict]:
+    """Pure function (--include-yoy): return a copy of `rows` with
+    "<stat>_yoy_abs"/"<stat>_yoy_pct" columns added for each of
+    `stat_cols`, comparing each row to the same period one year back
+    (see year_ago_period_label()) *within its own group*.
+
+    `lookup` maps (group_key(row) if group_key else None, period_label) ->
+    row, and must cover every period a year-ago comparison might land on --
+    typically all of `rows` plus any extra year-ago-only periods the
+    caller fetched separately (see year_ago_period()), for rows near the
+    start of the requested range whose year-ago period falls outside it.
+    A row with no matching entry in `lookup` (data wasn't fetched, or the
+    year-ago period doesn't exist at all) gets None for both new columns.
+
+    Doesn't touch `ee` -- pure list/dict/date manipulation -- so it's
+    testable offline like every other row-shaping helper here.
+    """
+    out = []
+    for row in rows:
+        group = group_key(row) if group_key else None
+        year_ago_label = year_ago_period_label(row.get("period"), freq)
+        year_ago_row = lookup.get((group, year_ago_label)) if year_ago_label else None
+        new_row = dict(row)
+        for stat in stat_cols:
+            abs_change, pct_change = _stat_diff(
+                row.get(stat), year_ago_row.get(stat) if year_ago_row else None
+            )
+            new_row[f"{stat}_yoy_abs"] = abs_change
+            new_row[f"{stat}_yoy_pct"] = pct_change
+        out.append(new_row)
+    return out
+
+
+def _sanitize_filename_token(s: str) -> str:
+    """Pure helper (--raster-out): turn `s` into a filesystem-safe, all-
+    underscore token -- lowercased, every run of non-alphanumeric characters
+    (hyphens, spaces, slashes, etc.) collapsed to a single underscore, with
+    leading/trailing underscores stripped. Used for every component of a
+    --raster-out filename, so a period label like "2022-01" or "2022-W05"
+    becomes "2022_01"/"2022_w05" rather than carrying a hyphen through --
+    filenames stay entirely underscore-separated.
+    """
+    token = re.sub(r"[^0-9a-zA-Z]+", "_", s.lower()).strip("_")
+    return token or "na"
+
+
+def build_raster_filename(geoextent: str, freetext: str) -> str:
+    """Pure function (--raster-out): the filename for one raster output
+    file, following the naming template
+    "{geoextent}_evnt_lit_ras_s0_viirs_pp_{freetext}.tif" -- category
+    "evnt" (event), subcategory "lit" (nighttime lights), scale code "s0"
+    (fixed -- this tool doesn't carry a scale-code convention of its own),
+    geometry type "ras" (raster), source "viirs", "pp" (post-processed),
+    then free text identifying the period/comparison. Every component is
+    run through _sanitize_filename_token() so the whole filename is
+    lowercase and underscore-separated, never hyphenated.
+    """
+    return (
+        f"{_sanitize_filename_token(geoextent)}_evnt_lit_ras_s0_viirs_pp_"
+        f"{_sanitize_filename_token(freetext)}.tif"
+    )
+
+
+def resolve_raster_geoextent(
+    aoi_iso3: Optional[str], raster_geoextent: Optional[str]
+) -> str:
+    """Pure function (--raster-out): the geoextent code to use in raster
+    filenames -- the ISO3 code automatically when --aoi-iso3 was used,
+    otherwise whatever --raster-geoextent supplied (required in that case,
+    since --aoi-file/--aoi-name have no ISO3 of their own). Raises
+    ValueError with a message fit to print directly when neither is
+    available.
+    """
+    if aoi_iso3:
+        return aoi_iso3
+    if raster_geoextent:
+        return raster_geoextent
+    raise ValueError(
+        "--raster-out needs a geoextent code for its filenames -- this is automatic "
+        "with --aoi-iso3, but --aoi-file/--aoi-name need --raster-geoextent set "
+        "explicitly (e.g. --raster-geoextent UKR)."
+    )
+
+
 def _get_stat(feature_properties: dict, band: str, stat: str):
     """Look up one reducer output, tolerant of two different Earth Engine naming
     conventions we've observed in practice: `Image.reduceRegion` (single AOI)
@@ -136,6 +343,21 @@ def _get_stat(feature_properties: dict, band: str, stat: str):
         if key in feature_properties:
             return feature_properties[key]
     return None
+
+
+def _extract_pct_dark(feature_properties: dict) -> Optional[float]:
+    """Pure helper: the pct_dark column value (0-100) from one reduceRegion/
+    reduceRegions output -- the percent of valid pixels below --dark-threshold.
+
+    Reads the 'dark_mean' reducer output specifically (never the bare 'mean'
+    fallback _get_stat() uses) -- the dark band is always added alongside the
+    real radiance band (see _add_dark_band()), so the image always has 2+
+    bands and Earth Engine always prefixes reducer outputs with the band
+    name; the bare-name convention _get_stat() tolerates only occurs with a
+    single selected band.
+    """
+    frac = feature_properties.get("dark_mean")
+    return frac * 100 if frac is not None else None
 
 
 def build_breakdown_row(
@@ -182,6 +404,7 @@ def build_breakdown_row(
             "mean_radiance": _get_stat(feature_properties, band, "mean"),
             "sum_radiance": _get_stat(feature_properties, band, "sum"),
             "median_radiance": _get_stat(feature_properties, band, "median"),
+            "pct_dark": _extract_pct_dark(feature_properties),
             "valid_pixel_count": _get_stat(feature_properties, band, "count"),
             "scene_count": scene_count,
             "qa_flag": qa_flag(scene_count, None),
@@ -590,7 +813,25 @@ def _combined_reducer():
     )
 
 
-def fetch_period_stats(freq: str, aoi_geom, period: Period, scale: int = 500) -> dict:
+def _add_dark_band(image, band: str, dark_threshold: float):
+    """Add a boolean 'dark' band (1 where `band` < `dark_threshold`, else 0)
+    alongside `band` itself, so one reduceRegion/reduceRegions call -- with
+    the same _combined_reducer(), which Earth Engine broadcasts across every
+    band of a multi-band image -- produces 'dark_mean' (the fraction of
+    valid pixels below the threshold) in addition to the usual mean/sum/
+    median/count on `band`, at no extra Earth Engine round trip.
+    """
+    dark = image.select(band).lt(dark_threshold).rename("dark")
+    return image.select(band).addBands(dark)
+
+
+def fetch_period_stats(
+    freq: str,
+    aoi_geom,
+    period: Period,
+    scale: int = 500,
+    dark_threshold: float = DEFAULT_DARK_THRESHOLD_NW,
+) -> dict:
     """Query Earth Engine for one period's zonal radiance stats + QA fields
     over a single AOI geometry."""
     image, band, scene_count = _get_period_image_and_scene_count(freq, period)
@@ -600,20 +841,23 @@ def fetch_period_stats(freq: str, aoi_geom, period: Period, scale: int = 500) ->
             "mean_radiance": None,
             "sum_radiance": None,
             "median_radiance": None,
+            "pct_dark": None,
             "valid_pixel_count": None,
             "total_pixel_count": None,
             "scene_count": 0,
             "qa_flag": "no_data",
         }
 
-    stats = image.reduceRegion(
+    stats = _add_dark_band(image, band, dark_threshold).reduceRegion(
         reducer=_combined_reducer(), geometry=aoi_geom, scale=scale, maxPixels=1e10, bestEffort=True
     ).getInfo()
+    dark_mean = stats.get("dark_mean")
     return {
         "period": period.label,
         "mean_radiance": stats.get(f"{band}_mean"),
         "sum_radiance": stats.get(f"{band}_sum"),
         "median_radiance": stats.get(f"{band}_median"),
+        "pct_dark": dark_mean * 100 if dark_mean is not None else None,
         "valid_pixel_count": stats.get(f"{band}_count"),
         "total_pixel_count": None,  # not tracked for the pre-composited/mosaicked product
         "scene_count": scene_count,
@@ -960,6 +1204,7 @@ def fetch_period_breakdown_stats(
     period: Period,
     scale: int = 500,
     attribute_fields: Optional[list[str]] = None,
+    dark_threshold: float = DEFAULT_DARK_THRESHOLD_NW,
 ) -> list[dict]:
     """Query Earth Engine for one period's zonal stats across every unit in `fc`
     in a single reduceRegions call, rather than one call per unit."""
@@ -1005,7 +1250,7 @@ def fetch_period_breakdown_stats(
             )
         return rows
 
-    reduced = image.select(band).reduceRegions(
+    reduced = _add_dark_band(image, band, dark_threshold).reduceRegions(
         collection=fc, reducer=_combined_reducer(), scale=scale, tileScale=4
     )
     features = reduced.getInfo()["features"]
@@ -1015,6 +1260,118 @@ def fetch_period_breakdown_stats(
         )
         for f in features
     ]
+
+
+def _download_image_geotiff(image, aoi_geom, out_path: Path, scale: int = 500) -> bool:
+    """ee-touching (--raster-out): download `image` (clipped to `aoi_geom`)
+    to `out_path` as a GeoTIFF via Image.getDownloadURL(), which works
+    synchronously for AOIs/resolutions small enough for Earth Engine to
+    hand back directly.
+
+    Falls back to kicking off an asynchronous Export.image.toDrive task
+    when the direct download is rejected (typically "Total request size
+    exceeds the limit" for a large AOI at fine resolution) -- prints where
+    the export landed (the caller's Google Drive, under the same filename)
+    rather than polling for completion, since a Drive export can take
+    anywhere from seconds to hours depending on size. Returns True if the
+    file was downloaded directly, False if it was handed off to Drive
+    instead (in which case `out_path` was NOT written by this call).
+    """
+    import urllib.request
+
+    import ee
+
+    clipped = image.clip(aoi_geom)
+    try:
+        url = clipped.getDownloadURL(
+            {"scale": scale, "region": aoi_geom, "format": "GEO_TIFF"}
+        )
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        urllib.request.urlretrieve(url, out_path)
+        return True
+    except Exception as e:  # noqa: BLE001 -- getDownloadURL's size-limit error isn't a stable type
+        print(
+            f"  Direct download failed ({e}) -- falling back to a Google Drive export task "
+            f"for {out_path.name}.",
+            file=sys.stderr,
+        )
+        task = ee.batch.Export.image.toDrive(
+            image=clipped,
+            description=out_path.stem[:100],
+            fileNamePrefix=out_path.stem,
+            scale=scale,
+            region=aoi_geom,
+            maxPixels=1e10,
+        )
+        task.start()
+        print(
+            f"  Started a Drive export task ({out_path.stem}) -- check Google Drive / the "
+            "Earth Engine Task Manager for completion; this tool doesn't wait for it.",
+            file=sys.stderr,
+        )
+        return False
+
+
+def export_period_raster(
+    freq: str, aoi_geom, period: Period, out_path: Path, scale: int = 500
+) -> bool:
+    """ee-touching (--raster-out): export one period's whole-AOI radiance
+    raster as a GeoTIFF. Returns False (with a printed note, no file
+    written) when the period has no VIIRS scenes available at all -- the
+    same "nothing to fetch" case fetch_period_stats() reports as qa_flag
+    'no_data'.
+    """
+    image, band, scene_count = _get_period_image_and_scene_count(freq, period)
+    if image is None:
+        print(f"  Skipping raster for {period.label}: no VIIRS scenes available.", file=sys.stderr)
+        return False
+    return _download_image_geotiff(image.select(band), aoi_geom, out_path, scale=scale)
+
+
+def export_yoy_diff_raster(
+    freq: str,
+    aoi_geom,
+    later_period: Period,
+    earlier_period: Period,
+    out_path: Path,
+    scale: int = 500,
+) -> bool:
+    """ee-touching (--raster-out with --include-yoy): export a 2-band
+    year-over-year diff GeoTIFF -- band 1 absolute change (later minus
+    earlier, nW/cm2/sr), band 2 percent change -- for one period vs. its
+    year-ago period, same absolute-then-percent layout as the older
+    Crimea/Ukraine change-layer rasters this mirrors. Percent change is
+    left masked out where the earlier period is <= 0 nW/cm2/sr, since
+    percent change from zero/negative is undefined (see README's note on
+    why percent change is noisy near zero -- this is the same instability,
+    just at the raster level instead of the zonal-stats level).
+
+    Returns False (with a printed note, no file written) when either
+    period has no VIIRS scenes available.
+    """
+    later_image, later_band, later_count = _get_period_image_and_scene_count(freq, later_period)
+    earlier_image, earlier_band, earlier_count = _get_period_image_and_scene_count(
+        freq, earlier_period
+    )
+    if later_image is None or earlier_image is None:
+        print(
+            f"  Skipping YoY diff raster for {later_period.label} vs {earlier_period.label}: "
+            "no VIIRS scenes available for one or both periods.",
+            file=sys.stderr,
+        )
+        return False
+
+    later_band_img = later_image.select(later_band)
+    earlier_band_img = earlier_image.select(earlier_band)
+    abs_change = later_band_img.subtract(earlier_band_img).rename("radiance_change_abs")
+    pct_change = (
+        abs_change.divide(earlier_band_img)
+        .multiply(100)
+        .updateMask(earlier_band_img.gt(0))
+        .rename("radiance_change_pct")
+    )
+    diff_image = abs_change.addBands(pct_change)
+    return _download_image_geotiff(diff_image, aoi_geom, out_path, scale=scale)
 
 
 def fetch_unit_geometries(fc) -> list[dict]:
@@ -1174,6 +1531,58 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "otherwise. Try 0.001 (~100m) as a starting point if you hit a "
             "'Request payload size exceeds the limit' error."
         ),
+    )
+    p.add_argument(
+        "--include-yoy",
+        action="store_true",
+        help=(
+            "Add <stat>_yoy_abs/<stat>_yoy_pct columns to mean_radiance/sum_radiance/"
+            "median_radiance -- each row vs. the same period one year back (e.g. March "
+            "2022 vs. March 2021; the same ISO week number a year earlier for --freq "
+            "weekly). Fetches whichever year-ago periods aren't already covered by "
+            "--start/--end as extra Earth Engine calls. Lead with the _abs column when "
+            "judging whether something real changed -- see README for why _pct gets "
+            "noisy near zero."
+        ),
+    )
+    p.add_argument(
+        "--dark-threshold",
+        type=float,
+        default=DEFAULT_DARK_THRESHOLD_NW,
+        help=(
+            "Radiance (nW/cm2/sr) below which a pixel counts as 'dark' for the "
+            "pct_dark output column (percent of valid pixels below this threshold "
+            f"in that period/unit). Default: {DEFAULT_DARK_THRESHOLD_NW}."
+        ),
+    )
+    p.add_argument(
+        "--raster-out",
+        action="store_true",
+        help=(
+            "Also export a whole-AOI radiance GeoTIFF for each period, written into the "
+            "same directory as --out (no separate location to set). With --include-yoy, "
+            "also exports a 2-band year-over-year diff GeoTIFF (band 1 absolute change, "
+            "band 2 percent change) for each period that has a year-ago period available. "
+            "Filenames follow '{geoextent}_evnt_lit_ras_s0_viirs_pp_{freetext}.tif' -- see "
+            "--raster-geoextent for where {geoextent} comes from. Downloads directly when "
+            "Earth Engine allows it; falls back to a Google Drive export task (not waited "
+            "on) for an AOI/resolution too large for a direct download."
+        ),
+    )
+    p.add_argument(
+        "--raster-geoextent",
+        default=None,
+        help=(
+            "Geoextent code for --raster-out filenames (e.g. 'UKR', 'crm' for a Crimea "
+            "AOI). Required when using --raster-out with --aoi-file or --aoi-name -- with "
+            "--aoi-iso3, its code is used automatically and this can be left out."
+        ),
+    )
+    p.add_argument(
+        "--raster-scale",
+        type=int,
+        default=500,
+        help="Pixel resolution in meters for --raster-out GeoTIFFs. Default: 500.",
     )
     return p
 
@@ -1475,6 +1884,33 @@ def run_wizard() -> list[str]:
         if geo_out:
             argv += ["--geo-out", geo_out]
 
+    if _prompt_yes_no(
+        "Add year-over-year change columns (each row vs. the same period one year "
+        "back)?",
+        default=False,
+    ):
+        argv.append("--include-yoy")
+
+    dark_threshold = _prompt_text(
+        "Dark-pixel threshold for the pct_dark column, nW/cm2/sr "
+        "(percent of valid pixels below this counts as 'dark' each period)",
+        default=str(DEFAULT_DARK_THRESHOLD_NW),
+    ).strip()
+    if dark_threshold and dark_threshold != str(DEFAULT_DARK_THRESHOLD_NW):
+        argv += ["--dark-threshold", dark_threshold]
+
+    if _prompt_yes_no(
+        "Also export a whole-AOI radiance GeoTIFF per period (written next to the CSV)?",
+        default=False,
+    ):
+        argv.append("--raster-out")
+        if aoi_choice != 0:  # not --aoi-iso3 -- no ISO3 to default the geoextent code to
+            raster_geoextent = _prompt_text(
+                "Geoextent code for raster filenames (e.g. 'UKR', 'crm')"
+            ).strip()
+            if raster_geoextent:
+                argv += ["--raster-geoextent", raster_geoextent]
+
     if breakdown_choice == 0:
         if _prompt_yes_no("Also write a chart PNG next to the CSV?", default=True):
             argv.append("--chart")
@@ -1528,6 +1964,16 @@ def build_argv_from_form(fields: dict) -> list[str]:
         out: str, output CSV path (required)
         geo_out: str -- optional path for a joined spatial output (.geojson or .shp),
             written as one file per period plus one combined file with every period
+        include_yoy: bool -- add <stat>_yoy_abs/_pct columns vs. the same period one
+            year back
+        dark_threshold: str/float -- radiance (nW/cm2/sr) below which a pixel counts
+            as 'dark' for the pct_dark column; blank/omitted uses the tool's default
+        raster_out: bool -- also export a whole-AOI radiance GeoTIFF per period (and a
+            YoY diff GeoTIFF per period, if include_yoy is set), written next to --out
+        raster_geoextent: str -- geoextent code for raster filenames; required when
+            raster_out is set and aoi_source isn't "iso3"
+        raster_scale: str/int -- pixel resolution in meters for raster_out GeoTIFFs;
+            blank/omitted uses the tool's default (500)
         chart: bool
         chart_units: str (comma-separated) or list[str] -- only used if chart
             and breakdown_level are both set
@@ -1621,6 +2067,42 @@ def build_argv_from_form(fields: dict) -> list[str]:
     if geo_out:
         argv += ["--geo-out", geo_out]
 
+    if fields.get("include_yoy"):
+        argv.append("--include-yoy")
+
+    dark_threshold = fields.get("dark_threshold")
+    if dark_threshold not in (None, ""):
+        try:
+            float(dark_threshold)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"Dark-pixel threshold {dark_threshold!r} isn't a number -- enter a "
+                "radiance value in nW/cm2/sr (e.g. 0.5) or leave it blank."
+            )
+        argv += ["--dark-threshold", str(dark_threshold)]
+
+    if fields.get("raster_out"):
+        argv.append("--raster-out")
+        if aoi_source != "iso3":
+            raster_geoextent = (fields.get("raster_geoextent") or "").strip()
+            if not raster_geoextent:
+                raise ValueError(
+                    "Enter a geoextent code for raster filenames (e.g. 'UKR') -- "
+                    "--raster-out needs one when not using an ISO3 country code."
+                )
+            argv += ["--raster-geoextent", raster_geoextent]
+
+        raster_scale = fields.get("raster_scale")
+        if raster_scale not in (None, ""):
+            try:
+                int(raster_scale)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"Raster scale {raster_scale!r} isn't a whole number -- enter meters "
+                    "per pixel (e.g. 500) or leave it blank."
+                )
+            argv += ["--raster-scale", str(raster_scale)]
+
     if fields.get("chart"):
         argv.append("--chart")
         if breakdown_level:
@@ -1663,6 +2145,14 @@ def main(argv: Optional[list[str]] = None) -> int:
             f"{len(periods)} separate Earth Engine calls and may be slow.",
             file=sys.stderr,
         )
+
+    raster_geoextent = None
+    if args.raster_out:
+        try:
+            raster_geoextent = resolve_raster_geoextent(args.aoi_iso3, args.raster_geoextent)
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
+            return 1
 
     import ee
 
@@ -1724,14 +2214,73 @@ def main(argv: Optional[list[str]] = None) -> int:
             print(f"[{i}/{len(periods)}] {period.label} ...", file=sys.stderr)
             rows.extend(
                 fetch_period_breakdown_stats(
-                    args.freq, fc, period, attribute_fields=attribute_fields
+                    args.freq,
+                    fc,
+                    period,
+                    attribute_fields=attribute_fields,
+                    dark_threshold=args.dark_threshold,
                 )
             )
     else:
         aoi_geom = resolve_aoi_geometry(args.aoi_file, args.aoi_name)
         for i, period in enumerate(periods, 1):
             print(f"[{i}/{len(periods)}] {period.label} ...", file=sys.stderr)
-            rows.append(fetch_period_stats(args.freq, aoi_geom, period))
+            rows.append(
+                fetch_period_stats(
+                    args.freq, aoi_geom, period, dark_threshold=args.dark_threshold
+                )
+            )
+
+    change_group_key = _chart_key if args.breakdown else None
+
+    if args.include_yoy:
+        # Pool every period's rows (fetched already) by (group, period_label),
+        # then fetch only the year-ago periods that aren't already in that
+        # pool -- e.g. a two-year --start/--end already contains each later
+        # period's year-ago row, so only the first year's periods need a
+        # separate fetch.
+        pool: dict = {}
+        for row in rows:
+            key = change_group_key(row) if change_group_key else None
+            pool[(key, row.get("period"))] = row
+
+        existing_labels = {period.label for period in periods}
+        year_ago_periods = []
+        seen_labels = set()
+        for period in periods:
+            ya = year_ago_period(period, args.freq)
+            if ya is None or ya.label in existing_labels or ya.label in seen_labels:
+                continue
+            seen_labels.add(ya.label)
+            year_ago_periods.append(ya)
+
+        for i, ya_period in enumerate(year_ago_periods, 1):
+            print(
+                f"[yoy {i}/{len(year_ago_periods)}] fetching year-ago period "
+                f"{ya_period.label} ...",
+                file=sys.stderr,
+            )
+            if args.breakdown:
+                ya_rows = fetch_period_breakdown_stats(
+                    args.freq,
+                    fc,
+                    ya_period,
+                    attribute_fields=attribute_fields,
+                    dark_threshold=args.dark_threshold,
+                )
+            else:
+                ya_rows = [
+                    fetch_period_stats(
+                        args.freq, aoi_geom, ya_period, dark_threshold=args.dark_threshold
+                    )
+                ]
+            for row in ya_rows:
+                key = change_group_key(row) if change_group_key else None
+                pool[(key, row.get("period"))] = row
+
+        rows = compute_year_over_year_change(
+            rows, args.freq, pool, group_key=change_group_key
+        )
 
     out_path = Path(args.out)
     csv_rows = (
@@ -1819,6 +2368,53 @@ def main(argv: Optional[list[str]] = None) -> int:
         else:
             write_chart(rows, chart_path)
             print(f"Wrote chart to {chart_path}")
+
+    if args.raster_out:
+        # Always the whole AOI, regardless of --breakdown -- raster export
+        # isn't per-unit, so resolve the AOI geometry directly rather than
+        # via the --breakdown feature collection.
+        raster_aoi_geom = aoi_geom if not args.breakdown else resolve_aoi_geometry(
+            args.aoi_file, args.aoi_name
+        )
+        raster_dir = out_path.parent
+        written, skipped = 0, 0
+        for i, period in enumerate(periods, 1):
+            filename = build_raster_filename(raster_geoextent, period.label)
+            print(f"[raster {i}/{len(periods)}] {filename} ...", file=sys.stderr)
+            if export_period_raster(
+                args.freq, raster_aoi_geom, period, raster_dir / filename, scale=args.raster_scale
+            ):
+                written += 1
+            else:
+                skipped += 1
+        print(f"Wrote {written} raster file(s) to {raster_dir} ({skipped} skipped -- see notes above)")
+
+        if args.include_yoy:
+            yoy_written, yoy_skipped = 0, 0
+            yoy_pairs = [
+                (period, year_ago_period(period, args.freq))
+                for period in periods
+            ]
+            yoy_pairs = [(p, ya) for p, ya in yoy_pairs if ya is not None]
+            for i, (period, ya_period) in enumerate(yoy_pairs, 1):
+                freetext = f"diff_yoy_{period.label}_minus_{ya_period.label}"
+                filename = build_raster_filename(raster_geoextent, freetext)
+                print(f"[raster yoy {i}/{len(yoy_pairs)}] {filename} ...", file=sys.stderr)
+                if export_yoy_diff_raster(
+                    args.freq,
+                    raster_aoi_geom,
+                    period,
+                    ya_period,
+                    raster_dir / filename,
+                    scale=args.raster_scale,
+                ):
+                    yoy_written += 1
+                else:
+                    yoy_skipped += 1
+            print(
+                f"Wrote {yoy_written} YoY diff raster file(s) to {raster_dir} "
+                f"({yoy_skipped} skipped -- see notes above)"
+            )
 
     flagged = [r for r in rows if r.get("qa_flag") not in (None, "ok")]
     if flagged:

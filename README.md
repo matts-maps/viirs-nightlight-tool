@@ -22,9 +22,16 @@ can judge how much to trust each value — plus an optional chart.
 |---|---|
 | `period` | e.g. `2022-03` (monthly), `2022` (annual), `2022-03-14` (daily) |
 | `mean_radiance`, `sum_radiance`, `median_radiance` | zonal stats over the AOI, in the source product's native radiance units (nW·cm⁻²·sr⁻¹) |
+| `pct_dark` | percent of valid AOI pixels below `--dark-threshold` that period — a simple blackout/darkness indicator (see below) |
 | `valid_pixel_count` | number of AOI pixels that passed quality masking and contributed to the stats |
 | `scene_count` | number of satellite images available for that period |
 | `qa_flag` | `ok`, `no_data`, or `low_valid_pixels` — check this before trusting a row |
+
+Two more columns appear with `--include-yoy` (see [Year-over-year change](#year-over-year-change---include-yoy)):
+
+| Column | Meaning |
+|---|---|
+| `<stat>_yoy_abs`, `<stat>_yoy_pct` | for `mean_radiance`/`sum_radiance`/`median_radiance`: this row vs. the same period one year back |
 
 ## 1. Install
 
@@ -175,6 +182,11 @@ the exact GAUL name instead.
 | `--unit-id-field` | no | column in `--aoi-file` holding each unit's unique ID, typically a pcode (see below) |
 | `--attributes` | no | comma-separated field/column names to include as extra columns in `--breakdown` output (see below) |
 | `--simplify-tolerance` | no | simplify `--aoi-file` geometries by this many degrees before sending to Earth Engine — only relevant to `--breakdown --aoi-file` with a detailed layer (see below) |
+| `--include-yoy` | no | add `<stat>_yoy_abs`/`<stat>_yoy_pct` columns — each row vs. the same period one year back (see below) |
+| `--dark-threshold` | no | radiance (nW/cm²/sr) below which a pixel counts as "dark" for the `pct_dark` column — default `0.5` (see below) |
+| `--raster-out` | no | also export a whole-AOI radiance GeoTIFF per period, written next to `--out` — with `--include-yoy`, also a year-over-year diff GeoTIFF (see below) |
+| `--raster-geoextent` | no | geoextent code for `--raster-out` filenames — required with `--aoi-file`/`--aoi-name`; automatic from `--aoi-iso3` |
+| `--raster-scale` | no | pixel resolution in meters for `--raster-out` GeoTIFFs — default `500` |
 | `--wizard` | no | run the interactive prompt instead of using flags (also runs automatically with no arguments) |
 
 ### Breaking a country down by admin unit
@@ -391,6 +403,105 @@ name), `--geo-out ....shp` truncates and de-duplicates them automatically
 exactly which names got renamed to what — GeoJSON output isn't affected by
 this limit.
 
+### Year-over-year change: `--include-yoy`
+
+`--include-yoy` adds `<stat>_yoy_abs`/`<stat>_yoy_pct` columns for
+`mean_radiance`, `sum_radiance`, and `median_radiance` — each row compared
+against the same period exactly one year back (March 2022 vs. March 2021;
+the same ISO week number a year earlier for `--freq weekly`; February 29
+and ISO week 53 are skipped when there's no matching date a year back):
+
+```bash
+python nightlight_tool.py --aoi-iso3 UKR \
+    --start 2022-01-01 --end 2023-01-01 --freq monthly \
+    --out ukr_nightlights.csv --include-yoy --ee-project ee-masims
+```
+
+The year-ago period doesn't have to fall inside `--start`/`--end` — the tool
+fetches whichever year-ago periods aren't already covered by your date range
+as extra Earth Engine calls, the same way `--breakdown` fetches every unit in
+one call per period.
+
+**Lead with `_yoy_abs`, not `_yoy_pct`, when judging whether something real
+happened.** VIIRS radiance sits near zero across a lot of area/time (a quiet
+rural district on an ordinary night), and percent change gets wild there — a
+tiny, meaningless absolute change against a near-zero denominator can read as
+a huge percentage even though nothing real changed, while the same absolute
+change against a bright unit barely moves the percentage at all. This isn't
+hypothetical: an earlier raster-based change layer built for a Crimea/Ukraine
+analysis hit a 99.9th-percentile percent-change of 17,349% (max 4.75 million
+percent) driven entirely by near-zero-radiance pixels, and one rayon's mean
+*absolute* change was slightly negative (−0.10 nW/cm²/sr — essentially flat)
+while its mean *percent* change read +157%, purely from averaging ratios with
+near-zero denominators. Use `_yoy_pct` as a secondary check, and be skeptical
+of a large `_yoy_pct` value paired with a small `_yoy_abs` value.
+
+### Blackout/darkness indicator: `pct_dark` and `--dark-threshold`
+
+Every row also includes `pct_dark` — the percent of valid AOI pixels whose
+radiance fell below `--dark-threshold` (default `0.5` nW/cm²/sr) that period.
+It's computed alongside the other stats at no extra Earth Engine call, and is
+a simple, threshold-based way to track outages/blackouts: a rising `pct_dark`
+means more of the area went dark, independent of how bright the lit portion
+was. There's no single "correct" threshold — it depends on your sensor,
+region, and what counts as "dark" for your analysis — so pick a value that
+matches your own work and set it explicitly:
+
+```bash
+python nightlight_tool.py --aoi-iso3 UKR \
+    --start 2022-01-01 --end 2023-01-01 --freq monthly \
+    --out ukr_nightlights.csv --dark-threshold 0.3 --ee-project ee-masims
+```
+
+### Raster export: `--raster-out`
+
+`--raster-out` also exports a whole-AOI radiance GeoTIFF for each period,
+written into the same directory as `--out` — there's no separate output
+location to set, since `--out` already picks one:
+
+```bash
+python nightlight_tool.py --aoi-iso3 UKR \
+    --start 2022-01-01 --end 2022-04-01 --freq monthly \
+    --out ukr_nightlights.csv --raster-out --ee-project ee-masims
+```
+
+With `--include-yoy` also set, it additionally exports a 2-band
+year-over-year diff GeoTIFF per period that has a year-ago period available
+— band 1 absolute change (later minus earlier, nW/cm²/sr), band 2 percent
+change (masked out where the earlier period was ≤ 0, for the same
+near-zero-denominator reason described above).
+
+Filenames follow a fixed, all-underscore template:
+
+```
+{geoextent}_evnt_lit_ras_s0_viirs_pp_{freetext}.tif
+```
+
+`{geoextent}` is a short code identifying the AOI — automatic from
+`--aoi-iso3` (e.g. `ukr`), but **required via `--raster-geoextent`** when
+using `--aoi-file` or `--aoi-name`, since those have no ISO3 code of their
+own:
+
+```bash
+python nightlight_tool.py --aoi-file crimea_raions.geojson \
+    --start 2022-01-01 --end 2022-04-01 --freq monthly \
+    --out crimea_nightlights.csv --raster-out --raster-geoextent crm \
+    --ee-project ee-masims
+```
+
+`{freetext}` carries the period (e.g. `ukr_evnt_lit_ras_s0_viirs_pp_2022_01.tif`
+for the raw January 2022 raster) or, for a YoY diff, both periods being
+compared (e.g. `..._diff_yoy_2022_01_minus_2021_01.tif`). Every component is
+lowercased and run through the same sanitizer, so a period label like
+`2022-01` or `2022-W05` always comes out hyphen-free (`2022_01`/`2022_w05`).
+
+`--raster-scale` sets the pixel resolution in meters (default `500`,
+matching the tabular stats' default `scale`). Small AOIs at a reasonable
+resolution download directly; an AOI/resolution combination too large for a
+direct download automatically falls back to a Google Drive export task
+(printed to the console) — this tool doesn't wait for that task to finish,
+so check Google Drive or the Earth Engine Task Manager for its completion.
+
 ### Choosing a frequency
 
 - **monthly** (recommended default) uses NOAA's pre-composited, cloud-free
@@ -430,10 +541,9 @@ correctly, before spending an Earth Engine call on a real AOI.
 
 ## Known limitations (v1)
 
-- Time series only — no built-in change/anomaly detection against a
-  baseline period yet (e.g. flagging a blackout as a % drop vs. a pre-war
-  average). That's a natural v2 addition once the base tool is validated
-  against real areas.
+- Change detection is limited to year-over-year (`--include-yoy`) and a
+  simple dark-pixel-percent indicator (`pct_dark`) — there's no baseline
+  (e.g. pre-war average) comparison or month-over-month change yet.
 - The daily product's cloud/quality-flag bit layout in
   `daily_pixel_quality_mask()` reflects VNP46A2's documentation as of when
   this was written — NASA/NOAA have revised VIIRS product band layouts
@@ -454,10 +564,6 @@ correctly, before spending an Earth Engine call on a real AOI.
   [fieldmaps.io](https://fieldmaps.io) or [HDX COD](https://data.humdata.org/))
   and `--unit-name-field`, combined with `--simplify-tolerance` if needed
   (see above).
-- Output is tabular (CSV) only, even in `--breakdown` mode — the unit-name
-  column (plus `admin1_name`/`admin2_name`) lets you join it back onto a
-  boundary file yourself, but the tool doesn't write a joined
-  shapefile/GeoJSON directly. See Roadmap below.
 
 ## Roadmap
 
@@ -470,18 +576,15 @@ Towards a tool anyone can pick up without reading this whole README first:
 - **Geodatabase (`.gdb`) input** — `--aoi-file`/`--unit-name-field` currently
   read via `geopandas`, which supports `.gdb`, but this hasn't been tested or
   documented as a supported input format yet.
-- **Baseline/change detection** — flag a period as a % drop vs. a
-  user-defined baseline (e.g. pre-war average), for spotting likely
-  blackouts/damage rather than just reading a trend line by eye.
-- **Joined spatial output** — write the `--breakdown` results as a
-  GeoJSON/shapefile with each unit's stats as attributes (geometry + data in
-  one file), rather than a CSV the user joins onto a boundary file themselves.
-- **Clipped raster export** — an `--export-clipped-raster` style flag that
-  also writes the reduced VIIRS image for an AOI as a small GeoTIFF, for
-  visual sanity-checking of the mask/clip in a GIS.
+- **Baseline-period change detection** — `--include-yoy` covers
+  year-over-year; a fixed, user-chosen baseline period (e.g. a pre-war
+  average) to compare every row against is still open.
 Already delivered towards the "anyone can use it" goal: `--wizard` interactive
 mode (which also shows the actual admin-data fields available before you pick
 `--attributes`), `weekly` frequency, `--attributes` for choosing output
-columns, `--aoi-iso3` for unambiguous country selection, and small-multiples
+columns, `--aoi-iso3` for unambiguous country selection, small-multiples
 `--chart` support in `--breakdown` mode (`--chart-units` to pick specific
-units).
+units), `--geo-out` for a joined spatial output (GeoJSON/shapefile), year-
+over-year change columns (`--include-yoy`), a dark-pixel/blackout indicator
+(`pct_dark`, `--dark-threshold`), and whole-AOI raster export (`--raster-out`,
+with a year-over-year diff GeoTIFF when combined with `--include-yoy`).

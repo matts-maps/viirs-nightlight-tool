@@ -24,6 +24,7 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Optional
 
 from nightlight_tool import (
+    DEFAULT_DARK_THRESHOLD_NW,
     VALID_FREQS,
     build_argv_from_form,
     list_file_fields,
@@ -287,6 +288,49 @@ class NightlightGUI:
         ttk.Button(frm, text="Save As...", command=self._on_browse_geo_out).grid(row=row, column=2, **pad)
         row += 1
 
+        self.include_yoy = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            frm,
+            text="Add year-over-year change columns (each row vs. the same period one year back)",
+            variable=self.include_yoy,
+        ).grid(row=row, column=0, columnspan=2, sticky="w", **pad)
+        row += 1
+
+        ttk.Label(
+            frm, text="Dark-pixel threshold for pct_dark, nW/cm2/sr"
+        ).grid(row=row, column=0, sticky="w", **pad)
+        self.dark_threshold = tk.StringVar(value=str(DEFAULT_DARK_THRESHOLD_NW))
+        ttk.Entry(frm, textvariable=self.dark_threshold, width=10).grid(
+            row=row, column=1, sticky="w", **pad
+        )
+        row += 1
+
+        self.raster_out = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            frm,
+            text="Also export a whole-AOI radiance GeoTIFF per period (written next to the CSV)",
+            variable=self.raster_out,
+            command=self._on_raster_out_change,
+        ).grid(row=row, column=0, columnspan=2, sticky="w", **pad)
+        row += 1
+
+        self.raster_geoextent_label = ttk.Label(
+            frm, text="Geoextent code for raster filenames (e.g. 'UKR', 'crm')"
+        )
+        self.raster_geoextent_label.grid(row=row, column=0, sticky="w", **pad)
+        self.raster_geoextent = tk.StringVar()
+        self.raster_geoextent_entry = ttk.Entry(frm, textvariable=self.raster_geoextent, width=10)
+        self.raster_geoextent_entry.grid(row=row, column=1, sticky="w", **pad)
+        row += 1
+
+        ttk.Label(frm, text="Raster resolution, meters/pixel").grid(
+            row=row, column=0, sticky="w", **pad
+        )
+        self.raster_scale = tk.StringVar(value="500")
+        self.raster_scale_entry = ttk.Entry(frm, textvariable=self.raster_scale, width=10)
+        self.raster_scale_entry.grid(row=row, column=1, sticky="w", **pad)
+        row += 1
+
         self.chart = tk.BooleanVar(value=True)
         ttk.Checkbutton(frm, text="Also write a chart PNG", variable=self.chart).grid(
             row=row, column=0, columnspan=2, sticky="w", **pad
@@ -351,6 +395,21 @@ class NightlightGUI:
         if is_gaul and self.granularity.get() not in GAUL_ADMIN_LEVEL_LABELS:
             self.granularity.set(ADMIN_LEVEL_LABELS[0])
         self._on_granularity_change()
+        self._on_raster_out_change()
+
+    def _on_raster_out_change(self) -> None:
+        # --raster-geoextent is only needed without an ISO3 code to default
+        # it from (see resolve_raster_geoextent()) -- shown only then, and
+        # only while the raster checkbox is actually on, same grid()/
+        # grid_remove() pattern as the rest of this form's conditional
+        # fields.
+        show_geoextent = self.raster_out.get() and self.aoi_source.get() != "iso3"
+        if show_geoextent:
+            self.raster_geoextent_label.grid()
+            self.raster_geoextent_entry.grid()
+        else:
+            self.raster_geoextent_label.grid_remove()
+            self.raster_geoextent_entry.grid_remove()
 
     def _on_granularity_change(self) -> None:
         level = self.breakdown_level()
@@ -554,6 +613,11 @@ class NightlightGUI:
             "freq": self.freq.get(),
             "out": self.out.get(),
             "geo_out": self.geo_out.get(),
+            "include_yoy": self.include_yoy.get(),
+            "dark_threshold": self.dark_threshold.get() or None,
+            "raster_out": self.raster_out.get(),
+            "raster_geoextent": self.raster_geoextent.get(),
+            "raster_scale": self.raster_scale.get() or None,
             "chart": self.chart.get(),
             "chart_units": self.chart_units.get(),
             "ee_project": self.ee_project.get(),
