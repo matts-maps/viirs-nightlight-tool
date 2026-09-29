@@ -97,6 +97,8 @@ class NightlightGUI:
 
         self._build_widgets()
         self._on_aoi_source_change()
+        self._on_vector_out_change()
+        self._on_raster_change()
         self._poll_log_queue()
 
     # ------------------------------------------------------------------
@@ -269,33 +271,6 @@ class NightlightGUI:
         ).grid(row=row, column=1, sticky="w", **pad)
         row += 1
 
-        ttk.Label(frm, text="Output CSV path").grid(row=row, column=0, sticky="w", **pad)
-        self.out = tk.StringVar(value="out/nightlights.csv")
-        ttk.Entry(frm, textvariable=self.out, width=40).grid(row=row, column=1, sticky="w", **pad)
-        ttk.Button(frm, text="Save As...", command=self._on_browse_out).grid(row=row, column=2, **pad)
-        row += 1
-
-        ttk.Label(
-            frm,
-            text=(
-                "Spatial output path, optional\n"
-                "(.geojson or .shp, joined by unique ID/pcode -- one file per\n"
-                "period plus one combined file with every period)"
-            ),
-        ).grid(row=row, column=0, sticky="w", **pad)
-        self.geo_out = tk.StringVar()
-        ttk.Entry(frm, textvariable=self.geo_out, width=40).grid(row=row, column=1, sticky="w", **pad)
-        ttk.Button(frm, text="Save As...", command=self._on_browse_geo_out).grid(row=row, column=2, **pad)
-        row += 1
-
-        self.include_yoy = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
-            frm,
-            text="Add year-over-year change columns (each row vs. the same period one year back)",
-            variable=self.include_yoy,
-        ).grid(row=row, column=0, columnspan=2, sticky="w", **pad)
-        row += 1
-
         ttk.Label(
             frm, text="Dark-pixel threshold for pct_dark, nW/cm2/sr"
         ).grid(row=row, column=0, sticky="w", **pad)
@@ -305,35 +280,101 @@ class NightlightGUI:
         )
         row += 1
 
-        self.raster_out = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
-            frm,
-            text="Also export a whole-AOI radiance GeoTIFF per period (written next to the CSV)",
-            variable=self.raster_out,
-            command=self._on_raster_out_change,
-        ).grid(row=row, column=0, columnspan=2, sticky="w", **pad)
+        ttk.Separator(frm, orient="horizontal").grid(row=row, column=0, columnspan=3, sticky="ew", pady=(8, 0))
         row += 1
-
-        self.raster_geoextent_label = ttk.Label(
-            frm, text="Geoextent code for raster filenames (e.g. 'UKR', 'crm')"
+        ttk.Label(frm, text="Outputs", font=("", 10, "bold")).grid(
+            row=row, column=0, columnspan=3, sticky="w", **pad
         )
-        self.raster_geoextent_label.grid(row=row, column=0, sticky="w", **pad)
-        self.raster_geoextent = tk.StringVar()
-        self.raster_geoextent_entry = ttk.Entry(frm, textvariable=self.raster_geoextent, width=10)
-        self.raster_geoextent_entry.grid(row=row, column=1, sticky="w", **pad)
         row += 1
 
-        ttk.Label(frm, text="Raster resolution, meters/pixel").grid(
+        self.geoextent_label = ttk.Label(
+            frm, text="Geoextent/ISO3 code for output filenames (e.g. 'UKR', 'crm')"
+        )
+        self.geoextent_label.grid(row=row, column=0, sticky="w", **pad)
+        self.geoextent = tk.StringVar()
+        self.geoextent_entry = ttk.Entry(frm, textvariable=self.geoextent, width=10)
+        self.geoextent_entry.grid(row=row, column=1, sticky="w", **pad)
+        row += 1
+
+        ttk.Label(frm, text="Output folder (all outputs go here)").grid(
             row=row, column=0, sticky="w", **pad
         )
+        self.out_dir = tk.StringVar(value="out")
+        ttk.Entry(frm, textvariable=self.out_dir, width=40).grid(row=row, column=1, sticky="w", **pad)
+        ttk.Button(frm, text="Browse...", command=self._on_browse_out_dir).grid(row=row, column=2, **pad)
+        row += 1
+
+        ttk.Label(frm, text="Select outputs:").grid(row=row, column=0, sticky="w", **pad)
+        row += 1
+
+        # CSV is always produced -- shown checked-and-locked for visual
+        # consistency with the other Outputs checkboxes, not a real toggle.
+        self.csv_always_on = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            frm, text="CSV (always produced)", variable=self.csv_always_on, state="disabled"
+        ).grid(row=row, column=0, columnspan=2, sticky="w", padx=(24, 6), pady=3)
+        row += 1
+
+        self.include_yoy = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            frm,
+            text="  Add year-over-year change columns to the CSV (vs. the same period one year back)",
+            variable=self.include_yoy,
+        ).grid(row=row, column=0, columnspan=2, sticky="w", padx=(24, 6), pady=0)
+        row += 1
+
+        self.vector_out = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            frm,
+            text=(
+                "Vector -- joined to the boundary geometry by unique ID/pcode "
+                "(one file per period plus one combined file)"
+            ),
+            variable=self.vector_out,
+            command=self._on_vector_out_change,
+        ).grid(row=row, column=0, columnspan=2, sticky="w", padx=(24, 6), pady=3)
+        row += 1
+
+        self.vector_format = tk.StringVar(value="geojson")
+        self.vector_format_geojson_rb = ttk.Radiobutton(
+            frm, text="GeoJSON", variable=self.vector_format, value="geojson"
+        )
+        self.vector_format_geojson_rb.grid(row=row, column=0, sticky="w", padx=(48, 6), pady=0)
+        self.vector_format_shapefile_rb = ttk.Radiobutton(
+            frm, text="Shapefile", variable=self.vector_format, value="shapefile"
+        )
+        self.vector_format_shapefile_rb.grid(row=row, column=1, sticky="w", pady=0)
+        row += 1
+
+        ttk.Label(frm, text="Rasters").grid(row=row, column=0, sticky="nw", padx=(24, 6), pady=3)
+        rasters_frame = ttk.Frame(frm)
+        rasters_frame.grid(row=row, column=1, columnspan=2, sticky="w", pady=3)
+        self.raster_yoy = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            rasters_frame,
+            text="Year-over-year diff (independent of the CSV's year-over-year columns above)",
+            variable=self.raster_yoy,
+            command=self._on_raster_change,
+        ).grid(row=0, column=0, sticky="w")
+        self.raster_whole_aoi = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            rasters_frame,
+            text="Whole AOI radiance (one GeoTIFF per period)",
+            variable=self.raster_whole_aoi,
+            command=self._on_raster_change,
+        ).grid(row=1, column=0, sticky="w")
+        row += 1
+
+        self.raster_scale_label = ttk.Label(frm, text="Raster resolution, meters/pixel")
+        self.raster_scale_label.grid(row=row, column=0, sticky="w", padx=(48, 6), pady=3)
         self.raster_scale = tk.StringVar(value="500")
         self.raster_scale_entry = ttk.Entry(frm, textvariable=self.raster_scale, width=10)
         self.raster_scale_entry.grid(row=row, column=1, sticky="w", **pad)
         row += 1
 
         self.chart = tk.BooleanVar(value=True)
-        ttk.Checkbutton(frm, text="Also write a chart PNG", variable=self.chart).grid(
-            row=row, column=0, columnspan=2, sticky="w", **pad
+        ttk.Checkbutton(frm, text="Chart PNG", variable=self.chart).grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=(24, 6), pady=3
         )
         row += 1
 
@@ -395,21 +436,37 @@ class NightlightGUI:
         if is_gaul and self.granularity.get() not in GAUL_ADMIN_LEVEL_LABELS:
             self.granularity.set(ADMIN_LEVEL_LABELS[0])
         self._on_granularity_change()
-        self._on_raster_out_change()
+        self._on_geoextent_visibility_change()
 
-    def _on_raster_out_change(self) -> None:
-        # --raster-geoextent is only needed without an ISO3 code to default
-        # it from (see resolve_raster_geoextent()) -- shown only then, and
-        # only while the raster checkbox is actually on, same grid()/
-        # grid_remove() pattern as the rest of this form's conditional
-        # fields.
-        show_geoextent = self.raster_out.get() and self.aoi_source.get() != "iso3"
+    def _on_geoextent_visibility_change(self) -> None:
+        # The geoextent code is needed in every output filename (CSV,
+        # vector, rasters) -- shown and required whenever the AOI isn't an
+        # ISO3 lookup, since --aoi-iso3's code is used automatically then
+        # (see resolve_geoextent()). Same grid()/grid_remove() pattern as
+        # the rest of this form's conditional fields.
+        show_geoextent = self.aoi_source.get() != "iso3"
         if show_geoextent:
-            self.raster_geoextent_label.grid()
-            self.raster_geoextent_entry.grid()
+            self.geoextent_label.grid()
+            self.geoextent_entry.grid()
         else:
-            self.raster_geoextent_label.grid_remove()
-            self.raster_geoextent_entry.grid_remove()
+            self.geoextent_label.grid_remove()
+            self.geoextent_entry.grid_remove()
+
+    def _on_vector_out_change(self) -> None:
+        if self.vector_out.get():
+            self.vector_format_geojson_rb.grid()
+            self.vector_format_shapefile_rb.grid()
+        else:
+            self.vector_format_geojson_rb.grid_remove()
+            self.vector_format_shapefile_rb.grid_remove()
+
+    def _on_raster_change(self) -> None:
+        if self.raster_whole_aoi.get() or self.raster_yoy.get():
+            self.raster_scale_label.grid()
+            self.raster_scale_entry.grid()
+        else:
+            self.raster_scale_label.grid_remove()
+            self.raster_scale_entry.grid_remove()
 
     def _on_granularity_change(self) -> None:
         level = self.breakdown_level()
@@ -471,21 +528,10 @@ class NightlightGUI:
             return
         self._populate_field_widgets(fields)
 
-    def _on_browse_out(self) -> None:
-        path = filedialog.asksaveasfilename(
-            title="Output CSV path", defaultextension=".csv", filetypes=[("CSV", "*.csv")]
-        )
+    def _on_browse_out_dir(self) -> None:
+        path = filedialog.askdirectory(title="Output folder")
         if path:
-            self.out.set(path)
-
-    def _on_browse_geo_out(self) -> None:
-        path = filedialog.asksaveasfilename(
-            title="Spatial output path",
-            defaultextension=".geojson",
-            filetypes=[("GeoJSON", "*.geojson"), ("Shapefile", "*.shp")],
-        )
-        if path:
-            self.geo_out.set(path)
+            self.out_dir.set(path)
 
     def _on_load_fields(self) -> None:
         level = self.breakdown_level()
@@ -611,12 +657,13 @@ class NightlightGUI:
             "start": self.start.get(),
             "end": self.end.get(),
             "freq": self.freq.get(),
-            "out": self.out.get(),
-            "geo_out": self.geo_out.get(),
+            "out_dir": self.out_dir.get(),
+            "geoextent": self.geoextent.get(),
+            "vector_out": self.vector_format.get() if self.vector_out.get() else None,
             "include_yoy": self.include_yoy.get(),
             "dark_threshold": self.dark_threshold.get() or None,
-            "raster_out": self.raster_out.get(),
-            "raster_geoextent": self.raster_geoextent.get(),
+            "raster_whole_aoi": self.raster_whole_aoi.get(),
+            "raster_yoy": self.raster_yoy.get(),
             "raster_scale": self.raster_scale.get() or None,
             "chart": self.chart.get(),
             "chart_units": self.chart_units.get(),

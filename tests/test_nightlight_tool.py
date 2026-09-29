@@ -23,6 +23,7 @@ from nightlight_tool import (
     build_argv_from_form,
     build_breakdown_row,
     build_periods,
+    build_output_filename,
     build_raster_filename,
     compute_year_over_year_change,
     gaul_unit_name_id_fields,
@@ -31,8 +32,8 @@ from nightlight_tool import (
     qa_flag,
     rename_unit_columns,
     resolve_breakdown_collection,
+    resolve_geoextent,
     resolve_iso3_candidate_names,
-    resolve_raster_geoextent,
     select_breakdown_chart_units,
     shapefile_safe_field_names,
     simplify_geometry,
@@ -424,7 +425,7 @@ def test_build_arg_parser_accepts_admin3_through_5_for_aoi_file():
                 "--start", "2024-01-01",
                 "--end", "2024-02-01",
                 "--freq", "monthly",
-                "--out", "o.csv",
+                "--out-dir", "out",
             ]
         )
         assert args.breakdown == level
@@ -599,7 +600,7 @@ def test_build_argv_from_form_minimal_iso3_no_breakdown():
             "start": "2026-01-01",
             "end": "2026-04-01",
             "freq": "monthly",
-            "out": "out/nightlights.csv",
+            "out_dir": "out",
         }
     )
     assert argv == [
@@ -607,7 +608,7 @@ def test_build_argv_from_form_minimal_iso3_no_breakdown():
         "--start", "2026-01-01",
         "--end", "2026-04-01",
         "--freq", "monthly",
-        "--out", "out/nightlights.csv",
+        "--out-dir", "out",
     ]
     # and it should be accepted by the real parser, not just look plausible
     args = build_arg_parser().parse_args(argv)
@@ -615,17 +616,68 @@ def test_build_argv_from_form_minimal_iso3_no_breakdown():
     assert args.breakdown is None
 
 
+def test_build_argv_from_form_iso3_needs_no_geoextent():
+    # --aoi-iso3's own code is used automatically -- no separate geoextent
+    # field required, unlike --aoi-file/--aoi-name (see below).
+    argv = build_argv_from_form(
+        {
+            "aoi_source": "iso3",
+            "aoi_iso3": "UKR",
+            "start": "2026-01-01",
+            "end": "2026-02-01",
+            "freq": "monthly",
+            "out_dir": "out",
+        }
+    )
+    assert "--geoextent" not in argv
+
+
+def test_build_argv_from_form_non_iso3_requires_geoextent():
+    try:
+        build_argv_from_form(
+            {
+                "aoi_source": "name",
+                "aoi_name": "Ukraine",
+                "start": "2026-01-01",
+                "end": "2026-02-01",
+                "freq": "monthly",
+                "out_dir": "out",
+            }
+        )
+    except ValueError as e:
+        assert "geoextent" in str(e).lower()
+    else:
+        raise AssertionError("expected ValueError for a non-ISO3 AOI with no geoextent code")
+
+
+def test_build_argv_from_form_non_iso3_with_geoextent_ok():
+    argv = build_argv_from_form(
+        {
+            "aoi_source": "name",
+            "aoi_name": "Ukraine",
+            "geoextent": "UKR",
+            "start": "2026-01-01",
+            "end": "2026-02-01",
+            "freq": "monthly",
+            "out_dir": "out",
+        }
+    )
+    args = build_arg_parser().parse_args(argv)
+    assert args.geoextent == "UKR"
+
+
 def test_build_argv_from_form_gaul_breakdown_admin1():
     argv = build_argv_from_form(
         {
             "aoi_source": "name",
             "aoi_name": "Ukraine",
+            "geoextent": "UKR",
             "breakdown_level": 1,
             "attributes": ["ADM0_NAME", "ADM1_CODE"],
             "start": "2026-01-01",
             "end": "2026-02-01",
             "freq": "monthly",
-            "out": "o.csv",
+            "out_dir": "out",
             "chart": True,
             "ee_project": "my-ee-project",
         }
@@ -647,11 +699,12 @@ def test_build_argv_from_form_rejects_admin3_for_gaul_source():
             {
                 "aoi_source": "name",
                 "aoi_name": "Ukraine",
+                "geoextent": "UKR",
                 "breakdown_level": 3,
                 "start": "2026-01-01",
                 "end": "2026-02-01",
                 "freq": "monthly",
-                "out": "o.csv",
+                "out_dir": "out",
             }
         )
     except ValueError as e:
@@ -670,7 +723,7 @@ def test_build_argv_from_form_file_breakdown_requires_unit_name_field():
                 "start": "2026-01-01",
                 "end": "2026-02-01",
                 "freq": "monthly",
-                "out": "o.csv",
+                "out_dir": "out",
             }
         )
     except ValueError as e:
@@ -684,6 +737,7 @@ def test_build_argv_from_form_file_breakdown_admin3_with_all_fields():
         {
             "aoi_source": "file",
             "aoi_file": "aoi.geojson",
+            "geoextent": "VEN",
             "breakdown_level": 3,
             "unit_name_field": "adm3_name",
             "unit_id_field": "adm3_pcode",
@@ -692,7 +746,7 @@ def test_build_argv_from_form_file_breakdown_admin3_with_all_fields():
             "start": "2026-05-01",
             "end": "2026-09-01",
             "freq": "monthly",
-            "out": "out/ven3.csv",
+            "out_dir": "out",
             "chart": True,
             "chart_units": ["Independencia", "Sucre"],
         }
@@ -718,7 +772,7 @@ def test_build_argv_from_form_chart_units_ignored_without_breakdown():
             "start": "2026-01-01",
             "end": "2026-02-01",
             "freq": "monthly",
-            "out": "o.csv",
+            "out_dir": "out",
             "chart": True,
             "chart_units": ["should", "be", "ignored"],
         }
@@ -727,15 +781,15 @@ def test_build_argv_from_form_chart_units_ignored_without_breakdown():
     assert "--chart" in argv
 
 
-def test_build_argv_from_form_requires_dates_and_out():
-    for missing in ("start", "end", "out"):
+def test_build_argv_from_form_requires_dates_and_out_dir():
+    for missing in ("start", "end", "out_dir"):
         fields = {
             "aoi_source": "iso3",
             "aoi_iso3": "UKR",
             "start": "2026-01-01",
             "end": "2026-02-01",
             "freq": "monthly",
-            "out": "o.csv",
+            "out_dir": "out",
         }
         fields[missing] = ""
         try:
@@ -746,7 +800,7 @@ def test_build_argv_from_form_requires_dates_and_out():
             raise AssertionError(f"expected ValueError with {missing!r} missing")
 
 
-def test_build_argv_from_form_geo_out_included_when_given():
+def test_build_argv_from_form_vector_out_included_when_given():
     argv = build_argv_from_form(
         {
             "aoi_source": "iso3",
@@ -754,15 +808,15 @@ def test_build_argv_from_form_geo_out_included_when_given():
             "start": "2026-01-01",
             "end": "2026-02-01",
             "freq": "monthly",
-            "out": "o.csv",
-            "geo_out": "o.geojson",
+            "out_dir": "out",
+            "vector_out": "geojson",
         }
     )
     args = build_arg_parser().parse_args(argv)
-    assert args.geo_out == "o.geojson"
+    assert args.vector_out == "geojson"
 
 
-def test_build_argv_from_form_geo_out_omitted_when_blank():
+def test_build_argv_from_form_vector_out_shapefile():
     argv = build_argv_from_form(
         {
             "aoi_source": "iso3",
@@ -770,13 +824,28 @@ def test_build_argv_from_form_geo_out_omitted_when_blank():
             "start": "2026-01-01",
             "end": "2026-02-01",
             "freq": "monthly",
-            "out": "o.csv",
-            "geo_out": "  ",
+            "out_dir": "out",
+            "vector_out": "shapefile",
         }
     )
-    assert "--geo-out" not in argv
     args = build_arg_parser().parse_args(argv)
-    assert args.geo_out is None
+    assert args.vector_out == "shapefile"
+
+
+def test_build_argv_from_form_vector_out_omitted_when_none():
+    argv = build_argv_from_form(
+        {
+            "aoi_source": "iso3",
+            "aoi_iso3": "UKR",
+            "start": "2026-01-01",
+            "end": "2026-02-01",
+            "freq": "monthly",
+            "out_dir": "out",
+        }
+    )
+    assert "--vector-out" not in argv
+    args = build_arg_parser().parse_args(argv)
+    assert args.vector_out is None
 
 
 def test_build_argv_from_form_include_yoy_included_when_checked():
@@ -787,7 +856,7 @@ def test_build_argv_from_form_include_yoy_included_when_checked():
             "start": "2026-01-01",
             "end": "2026-02-01",
             "freq": "monthly",
-            "out": "o.csv",
+            "out_dir": "out",
             "include_yoy": True,
         }
     )
@@ -803,7 +872,7 @@ def test_build_argv_from_form_include_yoy_omitted_when_unchecked():
             "start": "2026-01-01",
             "end": "2026-02-01",
             "freq": "monthly",
-            "out": "o.csv",
+            "out_dir": "out",
         }
     )
     assert "--include-yoy" not in argv
@@ -819,7 +888,7 @@ def test_build_argv_from_form_dark_threshold_included_when_given():
             "start": "2026-01-01",
             "end": "2026-02-01",
             "freq": "monthly",
-            "out": "o.csv",
+            "out_dir": "out",
             "dark_threshold": "0.75",
         }
     )
@@ -835,7 +904,7 @@ def test_build_argv_from_form_dark_threshold_omitted_uses_default():
             "start": "2026-01-01",
             "end": "2026-02-01",
             "freq": "monthly",
-            "out": "o.csv",
+            "out_dir": "out",
         }
     )
     assert "--dark-threshold" not in argv
@@ -852,7 +921,7 @@ def test_build_argv_from_form_dark_threshold_rejects_non_number():
                 "start": "2026-01-01",
                 "end": "2026-02-01",
                 "freq": "monthly",
-                "out": "o.csv",
+                "out_dir": "out",
                 "dark_threshold": "not-a-number",
             }
         )
@@ -870,7 +939,7 @@ def test_extract_pct_dark_reads_dark_mean():
 
 
 # ---------------------------------------------------------------------------
-# --raster-out: filename building and geoextent resolution
+# --raster-whole-aoi/--raster-yoy: filename building and geoextent resolution
 # ---------------------------------------------------------------------------
 
 
@@ -904,25 +973,30 @@ def test_build_raster_filename_all_underscores_no_hyphens():
     assert name == "crm_evnt_lit_ras_s0_viirs_pp_diff_yoy_2026_01_minus_2025_01.tif"
 
 
-def test_resolve_raster_geoextent_prefers_iso3():
-    assert resolve_raster_geoextent("UKR", None) == "UKR"
-    assert resolve_raster_geoextent("UKR", "crm") == "UKR"
+def test_resolve_geoextent_prefers_iso3():
+    assert resolve_geoextent("UKR", None) == "UKR"
+    assert resolve_geoextent("UKR", "crm") == "UKR"
 
 
-def test_resolve_raster_geoextent_falls_back_to_explicit_flag():
-    assert resolve_raster_geoextent(None, "crm") == "crm"
+def test_resolve_geoextent_falls_back_to_explicit_flag():
+    assert resolve_geoextent(None, "crm") == "crm"
 
 
-def test_resolve_raster_geoextent_raises_when_neither_given():
+def test_resolve_geoextent_raises_when_neither_given():
     try:
-        resolve_raster_geoextent(None, None)
+        resolve_geoextent(None, None)
     except ValueError as e:
-        assert "--raster-geoextent" in str(e)
+        assert "--geoextent" in str(e)
     else:
         raise AssertionError("expected ValueError when neither iso3 nor geoextent is given")
 
 
-def test_build_argv_from_form_raster_out_with_iso3_needs_no_geoextent():
+def test_build_output_filename_underscore_style():
+    assert build_output_filename("NPL", "csv") == "npl_nightlights.csv"
+    assert build_output_filename("npl", "geojson") == "npl_nightlights.geojson"
+
+
+def test_build_argv_from_form_raster_flags_with_iso3_need_no_geoextent():
     argv = build_argv_from_form(
         {
             "aoi_source": "iso3",
@@ -930,16 +1004,55 @@ def test_build_argv_from_form_raster_out_with_iso3_needs_no_geoextent():
             "start": "2026-01-01",
             "end": "2026-02-01",
             "freq": "monthly",
-            "out": "o.csv",
-            "raster_out": True,
+            "out_dir": "out",
+            "raster_whole_aoi": True,
+            "raster_yoy": True,
         }
     )
     args = build_arg_parser().parse_args(argv)
-    assert args.raster_out is True
-    assert args.raster_geoextent is None
+    assert args.raster_whole_aoi is True
+    assert args.raster_yoy is True
+    assert args.geoextent is None
 
 
-def test_build_argv_from_form_raster_out_with_file_requires_geoextent():
+def test_build_argv_from_form_raster_whole_aoi_and_yoy_are_independent():
+    # Checking only one of the two raster checkboxes shouldn't turn on the
+    # other -- they're independent, per the GUI design.
+    argv = build_argv_from_form(
+        {
+            "aoi_source": "iso3",
+            "aoi_iso3": "UKR",
+            "start": "2026-01-01",
+            "end": "2026-02-01",
+            "freq": "monthly",
+            "out_dir": "out",
+            "raster_whole_aoi": True,
+        }
+    )
+    args = build_arg_parser().parse_args(argv)
+    assert args.raster_whole_aoi is True
+    assert args.raster_yoy is False
+
+    argv2 = build_argv_from_form(
+        {
+            "aoi_source": "iso3",
+            "aoi_iso3": "UKR",
+            "start": "2026-01-01",
+            "end": "2026-02-01",
+            "freq": "monthly",
+            "out_dir": "out",
+            "raster_yoy": True,
+        }
+    )
+    args2 = build_arg_parser().parse_args(argv2)
+    assert args2.raster_whole_aoi is False
+    assert args2.raster_yoy is True
+
+
+def test_build_argv_from_form_non_iso3_with_raster_requires_geoextent():
+    # The geoextent check happens regardless of raster flags now (CSV needs
+    # it too) -- this just confirms the raster flags still work once a
+    # geoextent code is supplied.
     try:
         build_argv_from_form(
             {
@@ -948,14 +1061,14 @@ def test_build_argv_from_form_raster_out_with_file_requires_geoextent():
                 "start": "2026-01-01",
                 "end": "2026-02-01",
                 "freq": "monthly",
-                "out": "o.csv",
-                "raster_out": True,
+                "out_dir": "out",
+                "raster_whole_aoi": True,
             }
         )
     except ValueError as e:
         assert "geoextent" in str(e).lower()
     else:
-        raise AssertionError("expected ValueError for --raster-out without a geoextent code")
+        raise AssertionError("expected ValueError for a non-ISO3 AOI without a geoextent code")
 
 
 def test_build_argv_from_form_raster_out_with_file_and_geoextent_ok():
@@ -963,20 +1076,20 @@ def test_build_argv_from_form_raster_out_with_file_and_geoextent_ok():
         {
             "aoi_source": "file",
             "aoi_file": "aoi.geojson",
+            "geoextent": "crm",
             "start": "2026-01-01",
             "end": "2026-02-01",
             "freq": "monthly",
-            "out": "o.csv",
-            "raster_out": True,
-            "raster_geoextent": "crm",
+            "out_dir": "out",
+            "raster_whole_aoi": True,
         }
     )
     args = build_arg_parser().parse_args(argv)
-    assert args.raster_out is True
-    assert args.raster_geoextent == "crm"
+    assert args.raster_whole_aoi is True
+    assert args.geoextent == "crm"
 
 
-def test_build_argv_from_form_raster_out_omitted_by_default():
+def test_build_argv_from_form_raster_flags_omitted_by_default():
     argv = build_argv_from_form(
         {
             "aoi_source": "iso3",
@@ -984,12 +1097,14 @@ def test_build_argv_from_form_raster_out_omitted_by_default():
             "start": "2026-01-01",
             "end": "2026-02-01",
             "freq": "monthly",
-            "out": "o.csv",
+            "out_dir": "out",
         }
     )
-    assert "--raster-out" not in argv
+    assert "--raster-whole-aoi" not in argv
+    assert "--raster-yoy" not in argv
     args = build_arg_parser().parse_args(argv)
-    assert args.raster_out is False
+    assert args.raster_whole_aoi is False
+    assert args.raster_yoy is False
 
 
 def test_build_argv_from_form_raster_scale_included_when_given():
@@ -1000,13 +1115,31 @@ def test_build_argv_from_form_raster_scale_included_when_given():
             "start": "2026-01-01",
             "end": "2026-02-01",
             "freq": "monthly",
-            "out": "o.csv",
-            "raster_out": True,
+            "out_dir": "out",
+            "raster_whole_aoi": True,
             "raster_scale": "1000",
         }
     )
     args = build_arg_parser().parse_args(argv)
     assert args.raster_scale == 1000
+
+
+def test_build_argv_from_form_raster_scale_omitted_when_no_raster_flag():
+    # raster_scale is only meaningful with raster_whole_aoi/raster_yoy set --
+    # confirm it's not passed through on its own (would otherwise be a
+    # silently-ignored argparse default with no effect).
+    argv = build_argv_from_form(
+        {
+            "aoi_source": "iso3",
+            "aoi_iso3": "UKR",
+            "start": "2026-01-01",
+            "end": "2026-02-01",
+            "freq": "monthly",
+            "out_dir": "out",
+            "raster_scale": "1000",
+        }
+    )
+    assert "--raster-scale" not in argv
 
 
 # ---------------------------------------------------------------------------

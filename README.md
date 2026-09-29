@@ -71,7 +71,7 @@ python nightlight_tool.py \
     --aoi-file sample_aoi/toy_bbox.geojson \
     --start 2021-01-01 --end 2023-01-01 \
     --freq monthly \
-    --out out/toy_area_nightlights.csv \
+    --out-dir out --geoextent crm \
     --chart
 ```
 
@@ -95,8 +95,12 @@ builds the flags for you, so anything documented below applies either way.
 
 Prefer forms and dropdowns to a terminal? `nightlight_gui.py` is a Tkinter
 window with the same options as the wizard (AOI source, granularity,
-attribute/unit-ID columns, dates, frequency, chart, Earth Engine project),
-plus file/save dialogs and a live log panel instead of typed prompts:
+attribute/unit-ID columns, dates, frequency, Earth Engine project), plus an
+**Outputs** section — a geoextent/ISO3 code, one shared output folder for
+everything, and checkboxes for which outputs to produce (CSV is always on;
+Vector as GeoJSON or Shapefile; Rasters as independent whole-AOI-radiance and
+year-over-year-diff checkboxes; Chart) — a folder-browse dialog and a live
+log panel instead of typed prompts:
 
 ```bash
 python nightlight_gui.py
@@ -145,7 +149,8 @@ Earth Engine's FAO GAUL admin boundaries, country → admin-1 → admin-2):
 
 ```bash
 python nightlight_tool.py --aoi-name "Ukraine" \
-    --start 2021-01-01 --end 2026-09-01 --freq annual --out ukraine_annual.csv
+    --start 2021-01-01 --end 2026-09-01 --freq annual \
+    --out-dir out --geoextent UKR
 ```
 
 Or by ISO 3166-1 alpha-3 country code, which sidesteps having to know GAUL's
@@ -153,7 +158,7 @@ exact country-name spelling:
 
 ```bash
 python nightlight_tool.py --aoi-iso3 UKR \
-    --start 2021-01-01 --end 2026-09-01 --freq annual --out ukraine_annual.csv
+    --start 2021-01-01 --end 2026-09-01 --freq annual --out-dir out
 ```
 
 `--aoi-iso3` resolves the code to a country name and matches it against GAUL
@@ -172,8 +177,9 @@ the exact GAUL name instead.
 | `--aoi-iso3` | — | ISO 3166-1 alpha-3 country code, e.g. `UKR` — resolved to a GAUL country name automatically |
 | `--start`, `--end` | yes | ISO dates, `--end` is exclusive |
 | `--freq` | yes | `daily`, `weekly`, `monthly`, or `annual` |
-| `--out` | yes | output CSV path |
-| `--geo-out` | no | optional spatial output path (`.geojson` or `.shp`), joined to the boundary geometry by the unit's unique ID/pcode — one file per period plus one combined file with every period (see below) |
+| `--out-dir` | yes | output folder for every output this run produces (CSV, vector, rasters, chart) — filenames are built from `--geoextent`/`--aoi-iso3` |
+| `--geoextent` | no | geoextent code used in every output filename — required with `--aoi-file`/`--aoi-name`; automatic from `--aoi-iso3` |
+| `--vector-out` | no | `geojson` or `shapefile` — also write spatial output joined to the boundary geometry by the unit's unique ID/pcode, in addition to the CSV — one file per period plus one combined file with every period (see below) |
 | `--chart` | no | also write a PNG chart next to the CSV — one line chart for a single AOI, or a small-multiples grid (one mini chart per unit) with `--breakdown` (see below) |
 | `--chart-units` | no | comma-separated exact values from the output's unit-name column to chart, when using `--chart` with `--breakdown` (see below) |
 | `--ee-project` | no | your Earth Engine cloud project ID, if required (see step 2) |
@@ -184,9 +190,9 @@ the exact GAUL name instead.
 | `--simplify-tolerance` | no | simplify `--aoi-file` geometries by this many degrees before sending to Earth Engine — only relevant to `--breakdown --aoi-file` with a detailed layer (see below) |
 | `--include-yoy` | no | add `<stat>_yoy_abs`/`<stat>_yoy_pct` columns — each row vs. the same period one year back (see below) |
 | `--dark-threshold` | no | radiance (nW/cm²/sr) below which a pixel counts as "dark" for the `pct_dark` column — default `0.5` (see below) |
-| `--raster-out` | no | also export a whole-AOI radiance GeoTIFF per period, written next to `--out` — with `--include-yoy`, also a year-over-year diff GeoTIFF (see below) |
-| `--raster-geoextent` | no | geoextent code for `--raster-out` filenames — required with `--aoi-file`/`--aoi-name`; automatic from `--aoi-iso3` |
-| `--raster-scale` | no | pixel resolution in meters for `--raster-out` GeoTIFFs — default `500` |
+| `--raster-whole-aoi` | no | also export a whole-AOI radiance GeoTIFF per period, written into `--out-dir` — independent of `--raster-yoy` (see below) |
+| `--raster-yoy` | no | also export a year-over-year diff GeoTIFF per period, written into `--out-dir` — independent of `--raster-whole-aoi` **and** of `--include-yoy`'s tabular columns (see below) |
+| `--raster-scale` | no | pixel resolution in meters for `--raster-whole-aoi`/`--raster-yoy` GeoTIFFs — default `500` |
 | `--wizard` | no | run the interactive prompt instead of using flags (also runs automatically with no arguments) |
 
 ### Breaking a country down by admin unit
@@ -198,7 +204,7 @@ with its own radiance trend:
 ```bash
 python nightlight_tool.py --aoi-name "Yemen" \
     --start 2014-01-01 --end 2023-01-01 --freq annual \
-    --out yemen_by_governorate.csv --breakdown admin1 --ee-project ee-masims
+    --out-dir out --geoextent yem --breakdown admin1 --ee-project ee-masims
 ```
 
 This looks up FAO GAUL admin1 (governorate/oblast-level) or admin2
@@ -225,7 +231,7 @@ than a handful:
 ```bash
 python nightlight_tool.py --aoi-name "Yemen" --breakdown admin1 \
     --start 2014-01-01 --end 2023-01-01 --freq annual \
-    --out yemen_by_governorate.csv --chart --ee-project ee-masims
+    --out-dir out --geoextent yem --chart --ee-project ee-masims
 ```
 
 If there are more than 30 units, `--chart` charts the first 30 and warns you
@@ -235,7 +241,7 @@ values, comma-separated):
 ```bash
 python nightlight_tool.py --aoi-name "Yemen" --breakdown admin1 \
     --start 2014-01-01 --end 2023-01-01 --freq annual \
-    --out yemen_by_governorate.csv --chart --chart-units "Sana'a,Aden,Ta'izz" \
+    --out-dir out --geoextent yem --chart --chart-units "Sana'a,Aden,Ta'izz" \
     --ee-project ee-masims
 ```
 
@@ -249,7 +255,7 @@ holds each unit's name:
 ```bash
 python nightlight_tool.py --aoi-file crimea_raions.geojson --unit-name-field raion_name \
     --start 2021-01-01 --end 2023-01-01 --freq monthly \
-    --out crimea_by_raion.csv --breakdown admin2 --ee-project ee-masims
+    --out-dir out --geoextent crm --breakdown admin2 --ee-project ee-masims
 ```
 
 (Here `--breakdown admin2` is just a label for the output — with `--aoi-file`,
@@ -269,7 +275,7 @@ sources — HDX COD, fieldmaps.io — ship one, usually called something like
 python nightlight_tool.py --aoi-file crimea_raions.geojson \
     --unit-name-field raion_name --unit-id-field raion_pcode \
     --start 2021-01-01 --end 2023-01-01 --freq monthly \
-    --out crimea_by_raion.csv --breakdown admin2 --ee-project ee-masims
+    --out-dir out --geoextent crm --breakdown admin2 --ee-project ee-masims
 ```
 
 This adds an ID column to the output alongside the name column — both named
@@ -299,13 +305,13 @@ data become columns instead:
 python nightlight_tool.py --aoi-name "Venezuela" --breakdown admin2 \
     --attributes ADM0_NAME,ADM1_NAME \
     --start 2024-09-01 --end 2026-09-01 --freq monthly \
-    --out venezuela_admin2.csv --ee-project ee-masims
+    --out-dir out --geoextent ven --ee-project ee-masims
 
 # --aoi-file: use column names from your own file
 python nightlight_tool.py --aoi-file ven_admin2.geojson --unit-name-field adm2_name \
     --attributes adm1_name,adm1_pcode --breakdown admin2 \
     --start 2024-09-01 --end 2026-09-01 --freq monthly \
-    --out venezuela_admin2.csv --ee-project ee-masims --simplify-tolerance 0.001
+    --out-dir out --geoextent ven --ee-project ee-masims --simplify-tolerance 0.001
 ```
 
 When `--attributes` is given, it fully replaces the default columns — you get
@@ -335,7 +341,7 @@ before it's sent, e.g.:
 ```bash
 python nightlight_tool.py --aoi-file ven_admin2.geojson --unit-name-field adm2_name \
     --start 2024-09-01 --end 2026-09-01 --freq monthly \
-    --out venezuela_admin2.csv --breakdown admin2 --ee-project ee-masims \
+    --out-dir out --geoextent ven --breakdown admin2 --ee-project ee-masims \
     --simplify-tolerance 0.001
 ```
 
@@ -348,18 +354,18 @@ distorted more than larger ones at the same tolerance, so it's worth
 sanity-checking a simplified layer's shape before trusting results for
 tiny units.
 
-#### Getting a spatial file out: `--geo-out`
+#### Getting a spatial file out: `--vector-out`
 
 The CSV is great for spreadsheets and charting, but if you want the results
 in a GIS (QGIS, ArcGIS) joined straight to the boundary geometry, add
-`--geo-out` with a `.geojson` or `.shp` path:
+`--vector-out geojson` or `--vector-out shapefile`:
 
 ```bash
 python nightlight_tool.py --aoi-file crimea_raions.geojson \
     --unit-name-field raion_name --unit-id-field raion_pcode \
     --start 2021-01-01 --end 2023-01-01 --freq monthly \
-    --out crimea_by_raion.csv --breakdown admin2 --ee-project ee-masims \
-    --geo-out crimea_by_raion.geojson
+    --out-dir out --geoextent crm --breakdown admin2 --ee-project ee-masims \
+    --vector-out geojson
 ```
 
 The geometry join uses `--unit-id-field` (pcode) when you've given one,
@@ -369,9 +375,9 @@ that row is dropped from the spatial output and a warning is printed (the
 CSV still has it).
 
 This writes **one spatial file per period** — one per frequency step
-(month/week/year/day, whichever `--freq` is) — named with the period
-appended to the path you gave: `crimea_by_raion_2021-01.geojson`,
-`crimea_by_raion_2021-02.geojson`, and so on. Each file has one feature per
+(month/week/year/day, whichever `--freq` is) — named
+`{geoextent}_nightlights_{period}.{ext}`, e.g. `crm_nightlights_2021-01.geojson`,
+`crm_nightlights_2021-02.geojson`, and so on. Each file has one feature per
 unit, with:
 
 - the unit's name/ID columns (and any `--attributes` columns) you selected, and
@@ -383,25 +389,26 @@ animate months one at a time in a GIS, or load a single period's file to
 symbolize on its own. The period itself isn't repeated as a column in these
 files, since it's already at the end of every filename.
 
-Alongside those, `--geo-out` also writes **one combined file with every
-period in it** — `crimea_by_raion_all_periods.geojson` — a one-to-many join
-of unit → periods: one feature per unit *per period* (so the same unit's
-geometry repeats once per period), matching the CSV's row shape. This one
-keeps a `period` column, since that's the only thing telling rows for the
-same unit apart. Use this file when you want to symbolize, filter, or chart
-by period inside a single layer (e.g. a time-slider) rather than switching
-between per-period files.
+Alongside those, `--vector-out` also writes **one combined file with every
+period in it** — `{geoextent}_nightlights_all_periods.{ext}` (e.g.
+`crm_nightlights_all_periods.geojson`) — a one-to-many join of unit →
+periods: one feature per unit *per period* (so the same unit's geometry
+repeats once per period), matching the CSV's row shape. This one keeps a
+`period` column, since that's the only thing telling rows for the same unit
+apart. Use this file when you want to symbolize, filter, or chart by period
+inside a single layer (e.g. a time-slider) rather than switching between
+per-period files.
 
-`--geo-out` works with or without `--breakdown` — without it, there's just
-one "unit" (the whole AOI), so each period's file has a single feature (and
-the combined file has one feature per period).
+`--vector-out` works with or without `--breakdown` — without it, there's
+just one "unit" (the whole AOI), so each period's file has a single feature
+(and the combined file has one feature per period).
 
 Shapefile field names are capped at 10 characters by the format itself. If
 any of your column names are longer (or two get truncated down to the same
-name), `--geo-out ....shp` truncates and de-duplicates them automatically
-(appending `_2`, `_3`, etc. on a collision) and prints a warning listing
-exactly which names got renamed to what — GeoJSON output isn't affected by
-this limit.
+name), `--vector-out shapefile` truncates and de-duplicates them
+automatically (appending `_2`, `_3`, etc. on a collision) and prints a
+warning listing exactly which names got renamed to what — GeoJSON output
+isn't affected by this limit.
 
 ### Year-over-year change: `--include-yoy`
 
@@ -414,7 +421,7 @@ and ISO week 53 are skipped when there's no matching date a year back):
 ```bash
 python nightlight_tool.py --aoi-iso3 UKR \
     --start 2022-01-01 --end 2023-01-01 --freq monthly \
-    --out ukr_nightlights.csv --include-yoy --ee-project ee-masims
+    --out-dir out --include-yoy --ee-project ee-masims
 ```
 
 The year-ago period doesn't have to fall inside `--start`/`--end` — the tool
@@ -450,26 +457,33 @@ matches your own work and set it explicitly:
 ```bash
 python nightlight_tool.py --aoi-iso3 UKR \
     --start 2022-01-01 --end 2023-01-01 --freq monthly \
-    --out ukr_nightlights.csv --dark-threshold 0.3 --ee-project ee-masims
+    --out-dir out --dark-threshold 0.3 --ee-project ee-masims
 ```
 
-### Raster export: `--raster-out`
+### Raster export: `--raster-whole-aoi` and `--raster-yoy`
 
-`--raster-out` also exports a whole-AOI radiance GeoTIFF for each period,
-written into the same directory as `--out` — there's no separate output
-location to set, since `--out` already picks one:
+`--raster-whole-aoi` exports a whole-AOI radiance GeoTIFF for each period,
+written into `--out-dir` — there's no separate output location to set:
 
 ```bash
 python nightlight_tool.py --aoi-iso3 UKR \
     --start 2022-01-01 --end 2022-04-01 --freq monthly \
-    --out ukr_nightlights.csv --raster-out --ee-project ee-masims
+    --out-dir out --raster-whole-aoi --ee-project ee-masims
 ```
 
-With `--include-yoy` also set, it additionally exports a 2-band
-year-over-year diff GeoTIFF per period that has a year-ago period available
-— band 1 absolute change (later minus earlier, nW/cm²/sr), band 2 percent
-change (masked out where the earlier period was ≤ 0, for the same
-near-zero-denominator reason described above).
+`--raster-yoy` exports a 2-band year-over-year diff GeoTIFF per period that
+has a year-ago period available — band 1 absolute change (later minus
+earlier, nW/cm²/sr), band 2 percent change (masked out where the earlier
+period was ≤ 0, for the same near-zero-denominator reason described above).
+It's **independent of `--raster-whole-aoi` and of `--include-yoy`'s tabular
+columns** — turn on either raster flag, both, or neither, regardless of
+whether `--include-yoy` is set:
+
+```bash
+python nightlight_tool.py --aoi-iso3 UKR \
+    --start 2022-01-01 --end 2022-04-01 --freq monthly \
+    --out-dir out --raster-yoy --ee-project ee-masims
+```
 
 Filenames follow a fixed, all-underscore template:
 
@@ -477,15 +491,15 @@ Filenames follow a fixed, all-underscore template:
 {geoextent}_evnt_lit_ras_s0_viirs_pp_{freetext}.tif
 ```
 
-`{geoextent}` is a short code identifying the AOI — automatic from
-`--aoi-iso3` (e.g. `ukr`), but **required via `--raster-geoextent`** when
-using `--aoi-file` or `--aoi-name`, since those have no ISO3 code of their
-own:
+`{geoextent}` is a short code identifying the AOI, used in every output
+filename (CSV, vector, and raster alike) — automatic from `--aoi-iso3` (e.g.
+`ukr`), but **required via `--geoextent`** when using `--aoi-file` or
+`--aoi-name`, since those have no ISO3 code of their own:
 
 ```bash
 python nightlight_tool.py --aoi-file crimea_raions.geojson \
     --start 2022-01-01 --end 2022-04-01 --freq monthly \
-    --out crimea_nightlights.csv --raster-out --raster-geoextent crm \
+    --out-dir out --geoextent crm --raster-whole-aoi --raster-yoy \
     --ee-project ee-masims
 ```
 
@@ -584,7 +598,9 @@ mode (which also shows the actual admin-data fields available before you pick
 `--attributes`), `weekly` frequency, `--attributes` for choosing output
 columns, `--aoi-iso3` for unambiguous country selection, small-multiples
 `--chart` support in `--breakdown` mode (`--chart-units` to pick specific
-units), `--geo-out` for a joined spatial output (GeoJSON/shapefile), year-
-over-year change columns (`--include-yoy`), a dark-pixel/blackout indicator
-(`pct_dark`, `--dark-threshold`), and whole-AOI raster export (`--raster-out`,
-with a year-over-year diff GeoTIFF when combined with `--include-yoy`).
+units), `--vector-out` for a joined spatial output (GeoJSON/shapefile),
+year-over-year change columns (`--include-yoy`), a dark-pixel/blackout
+indicator (`pct_dark`, `--dark-threshold`), whole-AOI and year-over-year-diff
+raster export (`--raster-whole-aoi`, `--raster-yoy`), and a GUI Outputs
+section (one shared output folder, a geoextent/ISO3 code, and checkboxes for
+which outputs to produce).

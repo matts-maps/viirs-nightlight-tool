@@ -11,7 +11,7 @@ Quick start
     pip install -r requirements.txt
     earthengine authenticate      # one-time, needs a free Google account
     python nightlight_tool.py --aoi-file sample_aoi/crimea.geojson \\
-        --start 2021-01-01 --end 2023-01-01 --freq monthly --out crimea_nightlights.csv
+        --start 2021-01-01 --end 2023-01-01 --freq monthly --out-dir out --geoextent crm
 
 See README.md for full setup and usage details.
 
@@ -280,11 +280,11 @@ def compute_year_over_year_change(
 
 
 def _sanitize_filename_token(s: str) -> str:
-    """Pure helper (--raster-out): turn `s` into a filesystem-safe, all-
+    """Pure helper (--raster-whole-aoi/--raster-yoy): turn `s` into a filesystem-safe, all-
     underscore token -- lowercased, every run of non-alphanumeric characters
     (hyphens, spaces, slashes, etc.) collapsed to a single underscore, with
     leading/trailing underscores stripped. Used for every component of a
-    --raster-out filename, so a period label like "2022-01" or "2022-W05"
+    raster filename, so a period label like "2022-01" or "2022-W05"
     becomes "2022_01"/"2022_w05" rather than carrying a hyphen through --
     filenames stay entirely underscore-separated.
     """
@@ -293,7 +293,7 @@ def _sanitize_filename_token(s: str) -> str:
 
 
 def build_raster_filename(geoextent: str, freetext: str) -> str:
-    """Pure function (--raster-out): the filename for one raster output
+    """Pure function (--raster-whole-aoi/--raster-yoy): the filename for one raster output
     file, following the naming template
     "{geoextent}_evnt_lit_ras_s0_viirs_pp_{freetext}.tif" -- category
     "evnt" (event), subcategory "lit" (nighttime lights), scale code "s0"
@@ -309,25 +309,33 @@ def build_raster_filename(geoextent: str, freetext: str) -> str:
     )
 
 
-def resolve_raster_geoextent(
-    aoi_iso3: Optional[str], raster_geoextent: Optional[str]
-) -> str:
-    """Pure function (--raster-out): the geoextent code to use in raster
-    filenames -- the ISO3 code automatically when --aoi-iso3 was used,
-    otherwise whatever --raster-geoextent supplied (required in that case,
-    since --aoi-file/--aoi-name have no ISO3 of their own). Raises
+def resolve_geoextent(aoi_iso3: Optional[str], geoextent: Optional[str]) -> str:
+    """Pure function: the geoextent code to use in every output filename
+    (CSV, vector, raster) -- the ISO3 code automatically when --aoi-iso3
+    was used, otherwise whatever --geoextent supplied (required in that
+    case, since --aoi-file/--aoi-name have no ISO3 of their own). Raises
     ValueError with a message fit to print directly when neither is
     available.
     """
     if aoi_iso3:
         return aoi_iso3
-    if raster_geoextent:
-        return raster_geoextent
+    if geoextent:
+        return geoextent
     raise ValueError(
-        "--raster-out needs a geoextent code for its filenames -- this is automatic "
-        "with --aoi-iso3, but --aoi-file/--aoi-name need --raster-geoextent set "
-        "explicitly (e.g. --raster-geoextent UKR)."
+        "A geoextent code is needed for output filenames -- this is automatic with "
+        "--aoi-iso3, but --aoi-file/--aoi-name need --geoextent set explicitly "
+        "(e.g. --geoextent UKR)."
     )
+
+
+def build_output_filename(geoextent: str, suffix: str) -> str:
+    """Pure function: the filename for a CSV or vector output file, following
+    the naming template "{geoextent}_nightlights.{suffix}" (e.g.
+    "npl_nightlights.csv", "npl_nightlights.geojson"). Run through
+    _sanitize_filename_token() so it's lowercase and underscore-separated,
+    matching the raster filename convention in build_raster_filename().
+    """
+    return f"{_sanitize_filename_token(geoextent)}_nightlights.{suffix}"
 
 
 def _get_stat(feature_properties: dict, band: str, stat: str):
@@ -999,9 +1007,9 @@ def shapefile_safe_field_names(names: list[str]) -> dict[str, str]:
 
 
 def _geo_out_driver(out_path: Path) -> str:
-    """Pure function: infer the geopandas driver name from a --geo-out-style
+    """Pure function: infer the geopandas driver name from a --vector-out-style
     path's extension, or raise ValueError with a message naming the bad
-    path -- shared by every --geo-out write path so the accepted-extensions
+    path -- shared by every vector write path so the accepted-extensions
     rule only lives in one place.
     """
     suffix = out_path.suffix.lower()
@@ -1010,7 +1018,7 @@ def _geo_out_driver(out_path: Path) -> str:
     if suffix == ".shp":
         return "ESRI Shapefile"
     raise ValueError(
-        f"--geo-out path must end in .geojson or .shp, got {out_path.suffix!r} ({out_path})"
+        f"vector output path must end in .geojson or .shp, got {out_path.suffix!r} ({out_path})"
     )
 
 
@@ -1041,7 +1049,7 @@ def _write_geo_file(rows: list[dict], out_path: Path, driver: str):
 def split_rows_by_period(rows: list[dict], period_col: str = "period") -> dict[str, list[dict]]:
     """Pure function: group already-geometry-attached rows (see
     attach_geometry) by their period value, preserving first-seen period
-    order. This is how --geo-out builds one spatial file per period -- one
+    order. This is how --vector-out builds one spatial file per period -- one
     per frequency step (month/week/year/day, whichever --freq is), matching
     what --breakdown/--freq already computed, rather than one combined
     multi-period file.
@@ -1263,7 +1271,7 @@ def fetch_period_breakdown_stats(
 
 
 def _download_image_geotiff(image, aoi_geom, out_path: Path, scale: int = 500) -> bool:
-    """ee-touching (--raster-out): download `image` (clipped to `aoi_geom`)
+    """ee-touching (--raster-whole-aoi/--raster-yoy): download `image` (clipped to `aoi_geom`)
     to `out_path` as a GeoTIFF via Image.getDownloadURL(), which works
     synchronously for AOIs/resolutions small enough for Earth Engine to
     hand back directly.
@@ -1315,7 +1323,7 @@ def _download_image_geotiff(image, aoi_geom, out_path: Path, scale: int = 500) -
 def export_period_raster(
     freq: str, aoi_geom, period: Period, out_path: Path, scale: int = 500
 ) -> bool:
-    """ee-touching (--raster-out): export one period's whole-AOI radiance
+    """ee-touching (--raster-whole-aoi): export one period's whole-AOI radiance
     raster as a GeoTIFF. Returns False (with a printed note, no file
     written) when the period has no VIIRS scenes available at all -- the
     same "nothing to fetch" case fetch_period_stats() reports as qa_flag
@@ -1336,7 +1344,7 @@ def export_yoy_diff_raster(
     out_path: Path,
     scale: int = 500,
 ) -> bool:
-    """ee-touching (--raster-out with --include-yoy): export a 2-band
+    """ee-touching (--raster-yoy): export a 2-band
     year-over-year diff GeoTIFF -- band 1 absolute change (later minus
     earlier, nW/cm2/sr), band 2 percent change -- for one period vs. its
     year-ago period, same absolute-then-percent layout as the older
@@ -1375,7 +1383,7 @@ def export_yoy_diff_raster(
 
 
 def fetch_unit_geometries(fc) -> list[dict]:
-    """For --geo-out: pull each --breakdown unit's geometry (plus its raw
+    """For --vector-out: pull each --breakdown unit's geometry (plus its raw
     unit_name/unit_id) from Earth Engine, in one call -- separate from the
     per-period stats query, since geometry doesn't change across periods.
 
@@ -1398,7 +1406,7 @@ def fetch_unit_geometries(fc) -> list[dict]:
 
 
 def fetch_whole_aoi_geometry(aoi_geom):
-    """For --geo-out on a non-breakdown run: pull the single whole-AOI
+    """For --vector-out on a non-breakdown run: pull the single whole-AOI
     geometry down from Earth Engine as a shapely geometry."""
     from shapely.geometry import shape
 
@@ -1427,21 +1435,39 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--start", required=True, help="Start date, YYYY-MM-DD (inclusive)")
     p.add_argument("--end", required=True, help="End date, YYYY-MM-DD (exclusive)")
     p.add_argument("--freq", required=True, choices=VALID_FREQS, help="Time step")
-    p.add_argument("--out", required=True, help="Output CSV path")
     p.add_argument(
-        "--geo-out",
+        "--out-dir",
+        required=True,
+        help=(
+            "Output folder for every output file this run produces (CSV, vector, rasters, "
+            "chart). Filenames are built from --geoextent/--aoi-iso3, e.g. "
+            "'npl_nightlights.csv' -- there's no separate path to set for each output kind."
+        ),
+    )
+    p.add_argument(
+        "--geoextent",
         default=None,
         help=(
-            "Optional path for spatial output joined to the boundary geometry by the unit's "
-            "unique identifier/pcode, in addition to --out's CSV. Format is inferred from the "
-            "extension: .geojson or .shp. Writes one file per period (month/week/year/day, "
-            "whichever --freq is), named '<stem>_<period><ext>' next to this path -- one "
-            "feature per unit, with the unit's name/ID/attributes columns plus mean_radiance, "
-            "sum_radiance, median_radiance, valid_pixel_count, scene_count, and qa_flag -- plus "
-            "one combined file with every period in it (one feature per unit per period, same "
-            "row shape as the CSV, geometry repeated per period), named '<stem>_all_periods<ext>'. "
-            "Works with or without --breakdown -- without it, there's just one implicit 'unit' "
-            "(the whole AOI)."
+            "Geoextent code used in every output filename (e.g. 'UKR', 'crm' for a Crimea "
+            "AOI). Required with --aoi-file or --aoi-name -- with --aoi-iso3, its code is "
+            "used automatically and this can be left out."
+        ),
+    )
+    p.add_argument(
+        "--vector-out",
+        choices=("geojson", "shapefile"),
+        default=None,
+        help=(
+            "Also write spatial output joined to the boundary geometry by the unit's unique "
+            "identifier/pcode, in addition to the CSV, in the given format. Writes one file "
+            "per period (month/week/year/day, whichever --freq is), named "
+            "'<geoextent>_nightlights_<period><ext>' -- one feature per unit, with the unit's "
+            "name/ID/attributes columns plus mean_radiance, sum_radiance, median_radiance, "
+            "valid_pixel_count, scene_count, and qa_flag -- plus one combined file with every "
+            "period in it (one feature per unit per period, same row shape as the CSV, "
+            "geometry repeated per period), named '<geoextent>_nightlights_all_periods<ext>'. "
+            "Works with or without --breakdown -- without it, there's just one implicit "
+            "'unit' (the whole AOI)."
         ),
     )
     p.add_argument(
@@ -1556,33 +1582,37 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
-        "--raster-out",
+        "--raster-whole-aoi",
         action="store_true",
         help=(
-            "Also export a whole-AOI radiance GeoTIFF for each period, written into the "
-            "same directory as --out (no separate location to set). With --include-yoy, "
-            "also exports a 2-band year-over-year diff GeoTIFF (band 1 absolute change, "
-            "band 2 percent change) for each period that has a year-ago period available. "
-            "Filenames follow '{geoextent}_evnt_lit_ras_s0_viirs_pp_{freetext}.tif' -- see "
-            "--raster-geoextent for where {geoextent} comes from. Downloads directly when "
-            "Earth Engine allows it; falls back to a Google Drive export task (not waited "
-            "on) for an AOI/resolution too large for a direct download."
+            "Also export a whole-AOI radiance GeoTIFF for each period, written into "
+            "--out-dir. Independent of --raster-yoy -- turn on either, both, or neither. "
+            "Filenames follow '{geoextent}_evnt_lit_ras_s0_viirs_pp_{period}.tif' -- see "
+            "--geoextent for where {geoextent} comes from. Downloads directly when Earth "
+            "Engine allows it; falls back to a Google Drive export task (not waited on) "
+            "for an AOI/resolution too large for a direct download."
         ),
     )
     p.add_argument(
-        "--raster-geoextent",
-        default=None,
+        "--raster-yoy",
+        action="store_true",
         help=(
-            "Geoextent code for --raster-out filenames (e.g. 'UKR', 'crm' for a Crimea "
-            "AOI). Required when using --raster-out with --aoi-file or --aoi-name -- with "
-            "--aoi-iso3, its code is used automatically and this can be left out."
+            "Also export a 2-band year-over-year diff GeoTIFF (band 1 absolute change, "
+            "band 2 percent change) for each period that has a year-ago period available, "
+            "written into --out-dir. Independent of --include-yoy (the CSV's tabular "
+            "year-over-year columns) and of --raster-whole-aoi -- turn on either, both, or "
+            "neither raster flag regardless of --include-yoy. Filenames follow "
+            "'{geoextent}_evnt_lit_ras_s0_viirs_pp_diff_yoy_{period}_minus_{prior}.tif'."
         ),
     )
     p.add_argument(
         "--raster-scale",
         type=int,
         default=500,
-        help="Pixel resolution in meters for --raster-out GeoTIFFs. Default: 500.",
+        help=(
+            "Pixel resolution in meters for --raster-whole-aoi/--raster-yoy GeoTIFFs. "
+            "Default: 500."
+        ),
     )
     return p
 
@@ -1871,18 +1901,19 @@ def run_wizard() -> list[str]:
     freq_choice = _prompt_choice("Frequency", freq_options)
     argv += ["--freq", freq_options[freq_choice]]
 
-    argv += ["--out", _prompt_text("Output CSV path", default="out/nightlights.csv")]
+    argv += ["--out-dir", _prompt_text("Output folder for all outputs", default="out")]
+    if aoi_choice != 0:  # not --aoi-iso3 -- no ISO3 to default the geoextent code to
+        geoextent = _prompt_text("Geoextent code for output filenames (e.g. 'UKR', 'crm')").strip()
+        if geoextent:
+            argv += ["--geoextent", geoextent]
 
     if _prompt_yes_no(
         "Also write spatial output (GeoJSON/Shapefile), joined by the unit's unique "
         "ID/pcode -- one file per period plus one combined file with every period?",
         default=False,
     ):
-        geo_out = _prompt_text(
-            "Spatial output path (.geojson or .shp)", default="out/nightlights.geojson"
-        ).strip()
-        if geo_out:
-            argv += ["--geo-out", geo_out]
+        vector_choice = _prompt_choice("Vector format", ["GeoJSON", "Shapefile"])
+        argv += ["--vector-out", "geojson" if vector_choice == 0 else "shapefile"]
 
     if _prompt_yes_no(
         "Add year-over-year change columns (each row vs. the same period one year "
@@ -1900,16 +1931,18 @@ def run_wizard() -> list[str]:
         argv += ["--dark-threshold", dark_threshold]
 
     if _prompt_yes_no(
-        "Also export a whole-AOI radiance GeoTIFF per period (written next to the CSV)?",
+        "Also export a whole-AOI radiance GeoTIFF per period (written into the output "
+        "folder)?",
         default=False,
     ):
-        argv.append("--raster-out")
-        if aoi_choice != 0:  # not --aoi-iso3 -- no ISO3 to default the geoextent code to
-            raster_geoextent = _prompt_text(
-                "Geoextent code for raster filenames (e.g. 'UKR', 'crm')"
-            ).strip()
-            if raster_geoextent:
-                argv += ["--raster-geoextent", raster_geoextent]
+        argv.append("--raster-whole-aoi")
+
+    if _prompt_yes_no(
+        "Also export a year-over-year diff GeoTIFF per period (written into the output "
+        "folder) -- independent of the CSV's year-over-year columns above?",
+        default=False,
+    ):
+        argv.append("--raster-yoy")
 
     if breakdown_choice == 0:
         if _prompt_yes_no("Also write a chart PNG next to the CSV?", default=True):
@@ -1961,18 +1994,20 @@ def build_argv_from_form(fields: dict) -> list[str]:
         attributes: str (comma-separated) or list[str]
         start, end: str, YYYY-MM-DD (required)
         freq: one of VALID_FREQS (required)
-        out: str, output CSV path (required)
-        geo_out: str -- optional path for a joined spatial output (.geojson or .shp),
-            written as one file per period plus one combined file with every period
+        out_dir: str, output folder for every output this run produces (required)
+        geoextent: str -- geoextent code used in every output filename; required
+            when aoi_source isn't "iso3" (auto from the ISO3 code otherwise)
+        vector_out: "geojson" | "shapefile" | None -- also write spatial output
+            joined to the boundary geometry, in addition to the CSV, in this format
         include_yoy: bool -- add <stat>_yoy_abs/_pct columns vs. the same period one
             year back
         dark_threshold: str/float -- radiance (nW/cm2/sr) below which a pixel counts
             as 'dark' for the pct_dark column; blank/omitted uses the tool's default
-        raster_out: bool -- also export a whole-AOI radiance GeoTIFF per period (and a
-            YoY diff GeoTIFF per period, if include_yoy is set), written next to --out
-        raster_geoextent: str -- geoextent code for raster filenames; required when
-            raster_out is set and aoi_source isn't "iso3"
-        raster_scale: str/int -- pixel resolution in meters for raster_out GeoTIFFs;
+        raster_whole_aoi: bool -- also export a whole-AOI radiance GeoTIFF per period,
+            written into out_dir. Independent of include_yoy and raster_yoy.
+        raster_yoy: bool -- also export a year-over-year diff GeoTIFF per period,
+            written into out_dir. Independent of include_yoy and raster_whole_aoi.
+        raster_scale: str/int -- pixel resolution in meters for raster GeoTIFFs;
             blank/omitted uses the tool's default (500)
         chart: bool
         chart_units: str (comma-separated) or list[str] -- only used if chart
@@ -2058,14 +2093,25 @@ def build_argv_from_form(fields: dict) -> list[str]:
         raise ValueError(f"Choose a frequency ({', '.join(VALID_FREQS)}).")
     argv += ["--freq", freq]
 
-    out = (fields.get("out") or "").strip()
-    if not out:
-        raise ValueError("Choose an output CSV path.")
-    argv += ["--out", out]
+    out_dir = (fields.get("out_dir") or "").strip()
+    if not out_dir:
+        raise ValueError("Choose an output folder.")
+    argv += ["--out-dir", out_dir]
 
-    geo_out = (fields.get("geo_out") or "").strip()
-    if geo_out:
-        argv += ["--geo-out", geo_out]
+    if aoi_source != "iso3":
+        geoextent = (fields.get("geoextent") or "").strip()
+        if not geoextent:
+            raise ValueError(
+                "Enter a geoextent code for output filenames (e.g. 'UKR') -- needed "
+                "when not using an ISO3 country code."
+            )
+        argv += ["--geoextent", geoextent]
+
+    vector_out = fields.get("vector_out")
+    if vector_out:
+        if vector_out not in ("geojson", "shapefile"):
+            raise ValueError("Vector format must be 'geojson' or 'shapefile'.")
+        argv += ["--vector-out", vector_out]
 
     if fields.get("include_yoy"):
         argv.append("--include-yoy")
@@ -2081,17 +2127,12 @@ def build_argv_from_form(fields: dict) -> list[str]:
             )
         argv += ["--dark-threshold", str(dark_threshold)]
 
-    if fields.get("raster_out"):
-        argv.append("--raster-out")
-        if aoi_source != "iso3":
-            raster_geoextent = (fields.get("raster_geoextent") or "").strip()
-            if not raster_geoextent:
-                raise ValueError(
-                    "Enter a geoextent code for raster filenames (e.g. 'UKR') -- "
-                    "--raster-out needs one when not using an ISO3 country code."
-                )
-            argv += ["--raster-geoextent", raster_geoextent]
+    if fields.get("raster_whole_aoi"):
+        argv.append("--raster-whole-aoi")
+    if fields.get("raster_yoy"):
+        argv.append("--raster-yoy")
 
+    if fields.get("raster_whole_aoi") or fields.get("raster_yoy"):
         raster_scale = fields.get("raster_scale")
         if raster_scale not in (None, ""):
             try:
@@ -2146,13 +2187,11 @@ def main(argv: Optional[list[str]] = None) -> int:
             file=sys.stderr,
         )
 
-    raster_geoextent = None
-    if args.raster_out:
-        try:
-            raster_geoextent = resolve_raster_geoextent(args.aoi_iso3, args.raster_geoextent)
-        except ValueError as e:
-            print(str(e), file=sys.stderr)
-            return 1
+    try:
+        geoextent = resolve_geoextent(args.aoi_iso3, args.geoextent)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 1
 
     import ee
 
@@ -2282,15 +2321,17 @@ def main(argv: Optional[list[str]] = None) -> int:
             rows, args.freq, pool, group_key=change_group_key
         )
 
-    out_path = Path(args.out)
+    out_dir = Path(args.out_dir)
+    out_path = out_dir / build_output_filename(geoextent, "csv")
     csv_rows = (
         rename_unit_columns(rows, unit_name_column, unit_id_column) if args.breakdown else rows
     )
     write_csv(csv_rows, out_path)
     print(f"Wrote {len(rows)} rows to {out_path}")
 
-    if args.geo_out:
-        geo_out_path = Path(args.geo_out)
+    if args.vector_out:
+        vector_ext = "geojson" if args.vector_out == "geojson" else "shp"
+        geo_out_path = out_dir / build_output_filename(geoextent, vector_ext)
         missing_keys: set = set()
 
         if args.breakdown:
@@ -2369,27 +2410,29 @@ def main(argv: Optional[list[str]] = None) -> int:
             write_chart(rows, chart_path)
             print(f"Wrote chart to {chart_path}")
 
-    if args.raster_out:
+    if args.raster_whole_aoi or args.raster_yoy:
         # Always the whole AOI, regardless of --breakdown -- raster export
         # isn't per-unit, so resolve the AOI geometry directly rather than
         # via the --breakdown feature collection.
         raster_aoi_geom = aoi_geom if not args.breakdown else resolve_aoi_geometry(
             args.aoi_file, args.aoi_name
         )
-        raster_dir = out_path.parent
-        written, skipped = 0, 0
-        for i, period in enumerate(periods, 1):
-            filename = build_raster_filename(raster_geoextent, period.label)
-            print(f"[raster {i}/{len(periods)}] {filename} ...", file=sys.stderr)
-            if export_period_raster(
-                args.freq, raster_aoi_geom, period, raster_dir / filename, scale=args.raster_scale
-            ):
-                written += 1
-            else:
-                skipped += 1
-        print(f"Wrote {written} raster file(s) to {raster_dir} ({skipped} skipped -- see notes above)")
+        raster_dir = out_dir
 
-        if args.include_yoy:
+        if args.raster_whole_aoi:
+            written, skipped = 0, 0
+            for i, period in enumerate(periods, 1):
+                filename = build_raster_filename(geoextent, period.label)
+                print(f"[raster {i}/{len(periods)}] {filename} ...", file=sys.stderr)
+                if export_period_raster(
+                    args.freq, raster_aoi_geom, period, raster_dir / filename, scale=args.raster_scale
+                ):
+                    written += 1
+                else:
+                    skipped += 1
+            print(f"Wrote {written} raster file(s) to {raster_dir} ({skipped} skipped -- see notes above)")
+
+        if args.raster_yoy:
             yoy_written, yoy_skipped = 0, 0
             yoy_pairs = [
                 (period, year_ago_period(period, args.freq))
@@ -2398,7 +2441,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             yoy_pairs = [(p, ya) for p, ya in yoy_pairs if ya is not None]
             for i, (period, ya_period) in enumerate(yoy_pairs, 1):
                 freetext = f"diff_yoy_{period.label}_minus_{ya_period.label}"
-                filename = build_raster_filename(raster_geoextent, freetext)
+                filename = build_raster_filename(geoextent, freetext)
                 print(f"[raster yoy {i}/{len(yoy_pairs)}] {filename} ...", file=sys.stderr)
                 if export_yoy_diff_raster(
                     args.freq,
