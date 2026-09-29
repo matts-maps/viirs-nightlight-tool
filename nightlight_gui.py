@@ -326,10 +326,7 @@ class NightlightGUI:
         self.vector_out = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             frm,
-            text=(
-                "Vector -- joined to the boundary geometry by unique ID/pcode "
-                "(one file per period plus one combined file)"
-            ),
+            text="Vector",
             variable=self.vector_out,
             command=self._on_vector_out_change,
         ).grid(row=row, column=0, columnspan=2, sticky="w", padx=(24, 6), pady=3)
@@ -346,23 +343,27 @@ class NightlightGUI:
         self.vector_format_shapefile_rb.grid(row=row, column=1, sticky="w", pady=0)
         row += 1
 
-        ttk.Label(frm, text="Raster").grid(row=row, column=0, sticky="nw", padx=(24, 6), pady=3)
-        rasters_frame = ttk.Frame(frm)
-        rasters_frame.grid(row=row, column=1, columnspan=2, sticky="w", pady=3)
+        ttk.Label(frm, text="Raster").grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=(24, 6), pady=3
+        )
+        row += 1
+
         self.raster_yoy = tk.BooleanVar(value=False)
         ttk.Checkbutton(
-            rasters_frame,
+            frm,
             text="Year-over-year diff (independent of the CSV's year-over-year columns above)",
             variable=self.raster_yoy,
             command=self._on_raster_change,
-        ).grid(row=0, column=0, sticky="w")
+        ).grid(row=row, column=0, columnspan=2, sticky="w", padx=(48, 6), pady=0)
+        row += 1
+
         self.raster_whole_aoi = tk.BooleanVar(value=False)
         ttk.Checkbutton(
-            rasters_frame,
+            frm,
             text="Whole AOI radiance (one GeoTIFF per period)",
             variable=self.raster_whole_aoi,
             command=self._on_raster_change,
-        ).grid(row=1, column=0, sticky="w")
+        ).grid(row=row, column=0, columnspan=2, sticky="w", padx=(48, 6), pady=0)
         row += 1
 
         self.raster_scale_label = ttk.Label(frm, text="Raster resolution, meters/pixel")
