@@ -335,7 +335,7 @@ class NightlightGUI:
         ).grid(row=row, column=0, columnspan=2, sticky="w", padx=(24, 6), pady=3)
         row += 1
 
-        self.vector_format = tk.StringVar(value="geojson")
+        self.vector_format = tk.StringVar(value="shapefile")
         self.vector_format_geojson_rb = ttk.Radiobutton(
             frm, text="GeoJSON", variable=self.vector_format, value="geojson"
         )
@@ -346,7 +346,7 @@ class NightlightGUI:
         self.vector_format_shapefile_rb.grid(row=row, column=1, sticky="w", pady=0)
         row += 1
 
-        ttk.Label(frm, text="Rasters").grid(row=row, column=0, sticky="nw", padx=(24, 6), pady=3)
+        ttk.Label(frm, text="Raster").grid(row=row, column=0, sticky="nw", padx=(24, 6), pady=3)
         rasters_frame = ttk.Frame(frm)
         rasters_frame.grid(row=row, column=1, columnspan=2, sticky="w", pady=3)
         self.raster_yoy = tk.BooleanVar(value=False)

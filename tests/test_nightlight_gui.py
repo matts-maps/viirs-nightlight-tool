@@ -105,6 +105,14 @@ def test_raster_scale_field_shown_when_either_raster_checkbox_checked():
         _destroy(root)
 
 
+def test_vector_format_defaults_to_shapefile():
+    root, gui = _make_gui()
+    try:
+        assert gui.vector_format.get() == "shapefile"
+    finally:
+        _destroy(root)
+
+
 def test_raster_whole_aoi_and_yoy_are_independent_checkboxes():
     # Checking one shouldn't flip the other -- they're separate BooleanVars.
     root, gui = _make_gui()
