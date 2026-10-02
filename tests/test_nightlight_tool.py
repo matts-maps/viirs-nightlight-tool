@@ -26,14 +26,12 @@ from nightlight_tool import (
     build_output_filename,
     build_raster_filename,
     compute_year_over_year_change,
-    gaul_unit_name_id_fields,
     list_file_fields,
     parse_period_label,
     qa_flag,
     rename_unit_columns,
     resolve_breakdown_collection,
     resolve_geoextent,
-    resolve_iso3_candidate_names,
     select_breakdown_chart_units,
     shapefile_safe_field_names,
     simplify_geometry,
@@ -163,11 +161,10 @@ def test_write_csv_roundtrip(tmp_path):
     assert "2022-01,1.23,ok" in text
 
 
-def test_build_breakdown_row_admin1_ok():
+def test_build_breakdown_row_ok():
     props = {
         "unit_name": "Sana'a",
-        "ADM0_NAME": "Yemen",
-        "ADM1_NAME": "Sana'a",
+        "unit_id": "YE-SAN",
         "avg_rad_mean": 3.2,
         "avg_rad_sum": 1280.0,
         "avg_rad_median": 1.1,
@@ -176,9 +173,7 @@ def test_build_breakdown_row_admin1_ok():
     }
     row = build_breakdown_row("2022-01", "avg_rad", props, scene_count=1)
     assert row["unit_name"] == "Sana'a"
-    assert row["admin0_name"] == "Yemen"
-    assert row["admin1_name"] == "Sana'a"
-    assert row["admin2_name"] is None
+    assert row["unit_id"] == "YE-SAN"
     assert row["mean_radiance"] == 3.2
     assert row["sum_radiance"] == 1280.0
     assert row["median_radiance"] == 1.1
@@ -202,20 +197,25 @@ def test_build_breakdown_row_pct_dark_none_when_not_reduced():
     assert row["pct_dark"] is None
 
 
-def test_build_breakdown_row_admin2_carries_parent_name():
+def test_build_breakdown_row_carries_requested_attribute_fields():
     props = {
         "unit_name": "Some District",
         "ADM0_NAME": "Yemen",
         "ADM1_NAME": "Some Governorate",
-        "ADM2_NAME": "Some District",
         "avg_rad_mean": 0.5,
         "avg_rad_sum": 20.0,
         "avg_rad_median": 0.2,
         "avg_rad_count": 40,
     }
-    row = build_breakdown_row("2022", "avg_rad", props, scene_count=12)
-    assert row["admin1_name"] == "Some Governorate"
-    assert row["admin2_name"] == "Some District"
+    row = build_breakdown_row(
+        "2022",
+        "avg_rad",
+        props,
+        scene_count=12,
+        attribute_fields=["ADM0_NAME", "ADM1_NAME"],
+    )
+    assert row["ADM0_NAME"] == "Yemen"
+    assert row["ADM1_NAME"] == "Some Governorate"
 
 
 def test_build_breakdown_row_unprefixed_stat_keys():
@@ -342,35 +342,6 @@ def pytest_approx(value, rel):
     return _Approx()
 
 
-def test_resolve_iso3_candidate_names_simple_case():
-    # Ukraine is the easy case -- pycountry's plain name matches GAUL's
-    # ADM0_NAME exactly, no fallback needed.
-    assert resolve_iso3_candidate_names("UKR") == ["Ukraine"]
-
-
-def test_resolve_iso3_candidate_names_is_case_insensitive_input():
-    assert resolve_iso3_candidate_names("ukr") == ["Ukraine"]
-
-
-def test_resolve_iso3_candidate_names_multiple_candidates_for_tricky_country():
-    # South Korea is the case that motivates trying several candidates: none
-    # of pycountry's fields alone reliably matches whatever GAUL happens to
-    # use, so all non-empty name fields should come back for the caller to
-    # try in turn.
-    candidates = resolve_iso3_candidate_names("KOR")
-    assert "South Korea" in candidates  # common_name
-    assert any("Korea" in c for c in candidates)
-
-
-def test_resolve_iso3_candidate_names_rejects_unknown_code():
-    try:
-        resolve_iso3_candidate_names("XXX")
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("expected ValueError for an unrecognised ISO3 code")
-
-
 def _breakdown_rows_for(unit_names):
     return [{"unit_name": name, "period": "2022-01"} for name in unit_names]
 
@@ -412,9 +383,10 @@ def test_list_file_fields_excludes_geometry():
     assert "note" in fields
 
 
-def test_build_arg_parser_accepts_admin3_through_5_for_aoi_file():
-    # --aoi-file breakdown just uses the admin level as an output label, so
-    # nothing stops finer levels than GAUL (which tops out at admin2).
+def test_build_arg_parser_accepts_admin3_through_5():
+    # Breakdown just uses the admin level as an output label, so nothing
+    # stops finer levels -- any of admin1-5 works, however the boundary
+    # file is actually organized.
     p = build_arg_parser()
     for level in ("admin3", "admin4", "admin5"):
         args = p.parse_args(
@@ -426,26 +398,23 @@ def test_build_arg_parser_accepts_admin3_through_5_for_aoi_file():
                 "--end", "2024-02-01",
                 "--freq", "monthly",
                 "--out-dir", "out",
+                "--geoextent", "x",
             ]
         )
         assert args.breakdown == level
 
 
-def test_resolve_breakdown_collection_rejects_unsupported_gaul_level():
-    # FAO GAUL 2015 only carries admin1/admin2 below country level -- asking
-    # for admin3+ with --aoi-name should fail fast with a clear message
-    # pointing at --aoi-file, not a raw KeyError from the level lookup table.
+def test_resolve_breakdown_collection_requires_unit_name_field():
     import sys
     import types
 
     sys.modules.setdefault("ee", types.ModuleType("ee"))
     try:
-        resolve_breakdown_collection(None, "Ukraine", "admin3", None)
+        resolve_breakdown_collection("x.geojson", "admin3", None)
     except ValueError as e:
-        assert "admin3" in str(e)
-        assert "aoi-file" in str(e)
+        assert "unit-name-field" in str(e)
     else:
-        raise AssertionError("expected ValueError for unsupported GAUL admin level")
+        raise AssertionError("expected ValueError when --unit-name-field is missing")
 
 
 def test_write_csv_rejects_empty(tmp_path):
@@ -592,11 +561,11 @@ def test_select_breakdown_chart_units_falls_back_to_name_without_unit_id():
 # build_argv_from_form -- the GUI's argv-building core (no Tkinter involved)
 # ---------------------------------------------------------------------------
 
-def test_build_argv_from_form_minimal_iso3_no_breakdown():
+def test_build_argv_from_form_minimal_no_breakdown():
     argv = build_argv_from_form(
         {
-            "aoi_source": "iso3",
-            "aoi_iso3": "ukr",
+            "aoi_file": "aoi.geojson",
+            "geoextent": "crm",
             "start": "2026-01-01",
             "end": "2026-04-01",
             "freq": "monthly",
@@ -604,60 +573,26 @@ def test_build_argv_from_form_minimal_iso3_no_breakdown():
         }
     )
     assert argv == [
-        "--aoi-iso3", "UKR",
+        "--aoi-file", "aoi.geojson",
         "--start", "2026-01-01",
         "--end", "2026-04-01",
         "--freq", "monthly",
         "--out-dir", "out",
+        "--geoextent", "crm",
     ]
     # and it should be accepted by the real parser, not just look plausible
     args = build_arg_parser().parse_args(argv)
-    assert args.aoi_iso3 == "UKR"
+    assert args.aoi_file == "aoi.geojson"
     assert args.breakdown is None
 
 
-def test_build_argv_from_form_iso3_needs_no_geoextent():
-    # --aoi-iso3's own code is used automatically -- no separate geoextent
-    # field required, unlike --aoi-file/--aoi-name (see below).
-    argv = build_argv_from_form(
-        {
-            "aoi_source": "iso3",
-            "aoi_iso3": "UKR",
-            "start": "2026-01-01",
-            "end": "2026-02-01",
-            "freq": "monthly",
-            "out_dir": "out",
-        }
-    )
-    assert "--geoextent" not in argv
-
-
-def test_build_argv_from_form_iso3_with_explicit_geoextent_overrides():
-    # The geoextent field is always shown in the GUI, even for --aoi-iso3 --
-    # if the person fills it in there anyway, it should override the
-    # automatic ISO3-derived code rather than being silently dropped.
-    argv = build_argv_from_form(
-        {
-            "aoi_source": "iso3",
-            "aoi_iso3": "UKR",
-            "geoextent": "crm",
-            "start": "2026-01-01",
-            "end": "2026-02-01",
-            "freq": "monthly",
-            "out_dir": "out",
-        }
-    )
-    assert "--geoextent" in argv
-    args = build_arg_parser().parse_args(argv)
-    assert args.geoextent == "crm"
-
-
-def test_build_argv_from_form_non_iso3_requires_geoextent():
+def test_build_argv_from_form_requires_geoextent():
+    # --aoi-file has no code of its own to default to -- --geoextent is
+    # always required.
     try:
         build_argv_from_form(
             {
-                "aoi_source": "name",
-                "aoi_name": "Ukraine",
+                "aoi_file": "aoi.geojson",
                 "start": "2026-01-01",
                 "end": "2026-02-01",
                 "freq": "monthly",
@@ -667,60 +602,14 @@ def test_build_argv_from_form_non_iso3_requires_geoextent():
     except ValueError as e:
         assert "geoextent" in str(e).lower()
     else:
-        raise AssertionError("expected ValueError for a non-ISO3 AOI with no geoextent code")
+        raise AssertionError("expected ValueError with no geoextent code")
 
 
-def test_build_argv_from_form_non_iso3_with_geoextent_ok():
-    argv = build_argv_from_form(
-        {
-            "aoi_source": "name",
-            "aoi_name": "Ukraine",
-            "geoextent": "UKR",
-            "start": "2026-01-01",
-            "end": "2026-02-01",
-            "freq": "monthly",
-            "out_dir": "out",
-        }
-    )
-    args = build_arg_parser().parse_args(argv)
-    assert args.geoextent == "UKR"
-
-
-def test_build_argv_from_form_gaul_breakdown_admin1():
-    argv = build_argv_from_form(
-        {
-            "aoi_source": "name",
-            "aoi_name": "Ukraine",
-            "geoextent": "UKR",
-            "breakdown_level": 1,
-            "attributes": ["ADM0_NAME", "ADM1_CODE"],
-            "start": "2026-01-01",
-            "end": "2026-02-01",
-            "freq": "monthly",
-            "out_dir": "out",
-            "chart": True,
-            "ee_project": "my-ee-project",
-        }
-    )
-    args = build_arg_parser().parse_args(argv)
-    assert args.aoi_name == "Ukraine"
-    assert args.breakdown == "admin1"
-    assert args.attributes == "ADM0_NAME,ADM1_CODE"
-    assert args.chart is True
-    assert args.chart_units is None  # no unit filter given
-    assert args.ee_project == "my-ee-project"
-
-
-def test_build_argv_from_form_rejects_admin3_for_gaul_source():
-    # Mirrors the wizard's granularity cap -- FAO GAUL only carries
-    # admin1/admin2, so a country/name lookup can't go to admin3+.
+def test_build_argv_from_form_requires_aoi_file():
     try:
         build_argv_from_form(
             {
-                "aoi_source": "name",
-                "aoi_name": "Ukraine",
-                "geoextent": "UKR",
-                "breakdown_level": 3,
+                "geoextent": "crm",
                 "start": "2026-01-01",
                 "end": "2026-02-01",
                 "freq": "monthly",
@@ -728,17 +617,17 @@ def test_build_argv_from_form_rejects_admin3_for_gaul_source():
             }
         )
     except ValueError as e:
-        assert "admin1/admin2" in str(e) or "Admin3" in str(e)
+        assert "boundary file" in str(e).lower()
     else:
-        raise AssertionError("expected ValueError for admin3 with a GAUL source")
+        raise AssertionError("expected ValueError with no boundary file")
 
 
 def test_build_argv_from_form_file_breakdown_requires_unit_name_field():
     try:
         build_argv_from_form(
             {
-                "aoi_source": "file",
                 "aoi_file": "aoi.geojson",
+                "geoextent": "crm",
                 "breakdown_level": 3,
                 "start": "2026-01-01",
                 "end": "2026-02-01",
@@ -755,7 +644,6 @@ def test_build_argv_from_form_file_breakdown_requires_unit_name_field():
 def test_build_argv_from_form_file_breakdown_admin3_with_all_fields():
     argv = build_argv_from_form(
         {
-            "aoi_source": "file",
             "aoi_file": "aoi.geojson",
             "geoextent": "VEN",
             "breakdown_level": 3,
@@ -787,8 +675,8 @@ def test_build_argv_from_form_chart_units_ignored_without_breakdown():
     # chart has exactly one line, there's nothing to filter by unit.
     argv = build_argv_from_form(
         {
-            "aoi_source": "iso3",
-            "aoi_iso3": "UKR",
+            "aoi_file": "aoi.geojson",
+            "geoextent": "crm",
             "start": "2026-01-01",
             "end": "2026-02-01",
             "freq": "monthly",
@@ -804,8 +692,8 @@ def test_build_argv_from_form_chart_units_ignored_without_breakdown():
 def test_build_argv_from_form_requires_dates_and_out_dir():
     for missing in ("start", "end", "out_dir"):
         fields = {
-            "aoi_source": "iso3",
-            "aoi_iso3": "UKR",
+            "aoi_file": "aoi.geojson",
+            "geoextent": "crm",
             "start": "2026-01-01",
             "end": "2026-02-01",
             "freq": "monthly",
@@ -823,8 +711,8 @@ def test_build_argv_from_form_requires_dates_and_out_dir():
 def test_build_argv_from_form_vector_out_included_when_given():
     argv = build_argv_from_form(
         {
-            "aoi_source": "iso3",
-            "aoi_iso3": "UKR",
+            "aoi_file": "aoi.geojson",
+            "geoextent": "crm",
             "start": "2026-01-01",
             "end": "2026-02-01",
             "freq": "monthly",
@@ -839,8 +727,8 @@ def test_build_argv_from_form_vector_out_included_when_given():
 def test_build_argv_from_form_vector_out_shapefile():
     argv = build_argv_from_form(
         {
-            "aoi_source": "iso3",
-            "aoi_iso3": "UKR",
+            "aoi_file": "aoi.geojson",
+            "geoextent": "crm",
             "start": "2026-01-01",
             "end": "2026-02-01",
             "freq": "monthly",
@@ -855,8 +743,8 @@ def test_build_argv_from_form_vector_out_shapefile():
 def test_build_argv_from_form_vector_out_omitted_when_none():
     argv = build_argv_from_form(
         {
-            "aoi_source": "iso3",
-            "aoi_iso3": "UKR",
+            "aoi_file": "aoi.geojson",
+            "geoextent": "crm",
             "start": "2026-01-01",
             "end": "2026-02-01",
             "freq": "monthly",
@@ -871,8 +759,8 @@ def test_build_argv_from_form_vector_out_omitted_when_none():
 def test_build_argv_from_form_include_yoy_included_when_checked():
     argv = build_argv_from_form(
         {
-            "aoi_source": "iso3",
-            "aoi_iso3": "UKR",
+            "aoi_file": "aoi.geojson",
+            "geoextent": "crm",
             "start": "2026-01-01",
             "end": "2026-02-01",
             "freq": "monthly",
@@ -887,8 +775,8 @@ def test_build_argv_from_form_include_yoy_included_when_checked():
 def test_build_argv_from_form_include_yoy_omitted_when_unchecked():
     argv = build_argv_from_form(
         {
-            "aoi_source": "iso3",
-            "aoi_iso3": "UKR",
+            "aoi_file": "aoi.geojson",
+            "geoextent": "crm",
             "start": "2026-01-01",
             "end": "2026-02-01",
             "freq": "monthly",
@@ -903,8 +791,8 @@ def test_build_argv_from_form_include_yoy_omitted_when_unchecked():
 def test_build_argv_from_form_dark_threshold_included_when_given():
     argv = build_argv_from_form(
         {
-            "aoi_source": "iso3",
-            "aoi_iso3": "UKR",
+            "aoi_file": "aoi.geojson",
+            "geoextent": "crm",
             "start": "2026-01-01",
             "end": "2026-02-01",
             "freq": "monthly",
@@ -919,8 +807,8 @@ def test_build_argv_from_form_dark_threshold_included_when_given():
 def test_build_argv_from_form_dark_threshold_omitted_uses_default():
     argv = build_argv_from_form(
         {
-            "aoi_source": "iso3",
-            "aoi_iso3": "UKR",
+            "aoi_file": "aoi.geojson",
+            "geoextent": "crm",
             "start": "2026-01-01",
             "end": "2026-02-01",
             "freq": "monthly",
@@ -936,8 +824,8 @@ def test_build_argv_from_form_dark_threshold_rejects_non_number():
     try:
         build_argv_from_form(
             {
-                "aoi_source": "iso3",
-                "aoi_iso3": "UKR",
+                "aoi_file": "aoi.geojson",
+                "geoextent": "crm",
                 "start": "2026-01-01",
                 "end": "2026-02-01",
                 "freq": "monthly",
@@ -993,22 +881,17 @@ def test_build_raster_filename_all_underscores_no_hyphens():
     assert name == "crm_evnt_lit_ras_s0_viirs_pp_diff_yoy_2026_01_minus_2025_01.tif"
 
 
-def test_resolve_geoextent_prefers_iso3():
-    assert resolve_geoextent("UKR", None) == "UKR"
-    assert resolve_geoextent("UKR", "crm") == "UKR"
+def test_resolve_geoextent_returns_explicit_code():
+    assert resolve_geoextent("crm") == "crm"
 
 
-def test_resolve_geoextent_falls_back_to_explicit_flag():
-    assert resolve_geoextent(None, "crm") == "crm"
-
-
-def test_resolve_geoextent_raises_when_neither_given():
+def test_resolve_geoextent_raises_when_not_given():
     try:
-        resolve_geoextent(None, None)
+        resolve_geoextent(None)
     except ValueError as e:
         assert "--geoextent" in str(e)
     else:
-        raise AssertionError("expected ValueError when neither iso3 nor geoextent is given")
+        raise AssertionError("expected ValueError when no geoextent is given")
 
 
 def test_build_output_filename_underscore_style():
@@ -1016,32 +899,13 @@ def test_build_output_filename_underscore_style():
     assert build_output_filename("npl", "geojson") == "npl_nightlights.geojson"
 
 
-def test_build_argv_from_form_raster_flags_with_iso3_need_no_geoextent():
-    argv = build_argv_from_form(
-        {
-            "aoi_source": "iso3",
-            "aoi_iso3": "UKR",
-            "start": "2026-01-01",
-            "end": "2026-02-01",
-            "freq": "monthly",
-            "out_dir": "out",
-            "raster_whole_aoi": True,
-            "raster_yoy": True,
-        }
-    )
-    args = build_arg_parser().parse_args(argv)
-    assert args.raster_whole_aoi is True
-    assert args.raster_yoy is True
-    assert args.geoextent is None
-
-
 def test_build_argv_from_form_raster_whole_aoi_and_yoy_are_independent():
     # Checking only one of the two raster checkboxes shouldn't turn on the
     # other -- they're independent, per the GUI design.
     argv = build_argv_from_form(
         {
-            "aoi_source": "iso3",
-            "aoi_iso3": "UKR",
+            "aoi_file": "aoi.geojson",
+            "geoextent": "crm",
             "start": "2026-01-01",
             "end": "2026-02-01",
             "freq": "monthly",
@@ -1055,8 +919,8 @@ def test_build_argv_from_form_raster_whole_aoi_and_yoy_are_independent():
 
     argv2 = build_argv_from_form(
         {
-            "aoi_source": "iso3",
-            "aoi_iso3": "UKR",
+            "aoi_file": "aoi.geojson",
+            "geoextent": "crm",
             "start": "2026-01-01",
             "end": "2026-02-01",
             "freq": "monthly",
@@ -1069,14 +933,13 @@ def test_build_argv_from_form_raster_whole_aoi_and_yoy_are_independent():
     assert args2.raster_yoy is True
 
 
-def test_build_argv_from_form_non_iso3_with_raster_requires_geoextent():
-    # The geoextent check happens regardless of raster flags now (CSV needs
-    # it too) -- this just confirms the raster flags still work once a
+def test_build_argv_from_form_raster_requires_geoextent():
+    # The geoextent check happens regardless of raster flags (CSV needs it
+    # too) -- this just confirms the raster flags still work once a
     # geoextent code is supplied.
     try:
         build_argv_from_form(
             {
-                "aoi_source": "file",
                 "aoi_file": "aoi.geojson",
                 "start": "2026-01-01",
                 "end": "2026-02-01",
@@ -1088,13 +951,12 @@ def test_build_argv_from_form_non_iso3_with_raster_requires_geoextent():
     except ValueError as e:
         assert "geoextent" in str(e).lower()
     else:
-        raise AssertionError("expected ValueError for a non-ISO3 AOI without a geoextent code")
+        raise AssertionError("expected ValueError without a geoextent code")
 
 
-def test_build_argv_from_form_raster_out_with_file_and_geoextent_ok():
+def test_build_argv_from_form_raster_out_with_geoextent_ok():
     argv = build_argv_from_form(
         {
-            "aoi_source": "file",
             "aoi_file": "aoi.geojson",
             "geoextent": "crm",
             "start": "2026-01-01",
@@ -1112,8 +974,8 @@ def test_build_argv_from_form_raster_out_with_file_and_geoextent_ok():
 def test_build_argv_from_form_raster_flags_omitted_by_default():
     argv = build_argv_from_form(
         {
-            "aoi_source": "iso3",
-            "aoi_iso3": "UKR",
+            "aoi_file": "aoi.geojson",
+            "geoextent": "crm",
             "start": "2026-01-01",
             "end": "2026-02-01",
             "freq": "monthly",
@@ -1130,8 +992,8 @@ def test_build_argv_from_form_raster_flags_omitted_by_default():
 def test_build_argv_from_form_raster_scale_included_when_given():
     argv = build_argv_from_form(
         {
-            "aoi_source": "iso3",
-            "aoi_iso3": "UKR",
+            "aoi_file": "aoi.geojson",
+            "geoextent": "crm",
             "start": "2026-01-01",
             "end": "2026-02-01",
             "freq": "monthly",
@@ -1150,8 +1012,8 @@ def test_build_argv_from_form_raster_scale_omitted_when_no_raster_flag():
     # silently-ignored argparse default with no effect).
     argv = build_argv_from_form(
         {
-            "aoi_source": "iso3",
-            "aoi_iso3": "UKR",
+            "aoi_file": "aoi.geojson",
+            "geoextent": "crm",
             "start": "2026-01-01",
             "end": "2026-02-01",
             "freq": "monthly",
@@ -1163,8 +1025,8 @@ def test_build_argv_from_form_raster_scale_omitted_when_no_raster_flag():
 
 
 # ---------------------------------------------------------------------------
-# rename_unit_columns / gaul_unit_name_id_fields -- output columns named
-# after the field that actually identifies each unit, not a generic label.
+# rename_unit_columns -- output columns named after the field that actually
+# identifies each unit, not a generic label.
 # ---------------------------------------------------------------------------
 
 def test_rename_unit_columns_renames_both():
@@ -1208,19 +1070,6 @@ def test_rename_unit_columns_does_not_mutate_original_rows():
     assert rows == [{"period": "2026-01", "unit_name": "Independencia", "unit_id": "VE1301"}]
 
 
-def test_gaul_unit_name_id_fields_admin1_and_admin2():
-    assert gaul_unit_name_id_fields("admin1") == ("ADM1_NAME", "ADM1_CODE")
-    assert gaul_unit_name_id_fields("admin2") == ("ADM2_NAME", "ADM2_CODE")
-
-
-def test_gaul_unit_name_id_fields_rejects_admin3():
-    try:
-        gaul_unit_name_id_fields("admin3")
-    except ValueError as e:
-        assert "admin3" in str(e)
-        assert "aoi-file" in str(e)
-    else:
-        raise AssertionError("expected ValueError for admin3 (GAUL only goes to admin2)")
 
 
 # --- attach_geometry / shapefile_safe_field_names / split_rows_by_period --

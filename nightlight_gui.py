@@ -28,8 +28,6 @@ from nightlight_tool import (
     VALID_FREQS,
     build_argv_from_form,
     list_file_fields,
-    list_gaul_fields,
-    resolve_iso3_to_gaul_name,
 )
 from nightlight_tool import main as run_main
 
@@ -50,7 +48,6 @@ ADMIN_LEVEL_LABELS = [
     "Admin 4 (e.g. village/sub-ward)",
     "Admin 5 (finest level your data has)",
 ]
-GAUL_ADMIN_LEVEL_LABELS = ADMIN_LEVEL_LABELS[:3]  # FAO GAUL only goes to admin2
 
 
 class _QueueWriter:
@@ -98,12 +95,12 @@ class NightlightGUI:
         # Populated by _populate_field_widgets(); initialized empty here so
         # _refresh_attribute_checkbox_states() has something to iterate
         # over even before any columns have been loaded (it's reached via
-        # _on_aoi_source_change() right after _build_widgets(), below).
+        # _on_granularity_change() right after _build_widgets(), below).
         self._attribute_vars: dict[str, tk.BooleanVar] = {}
         self._attribute_checkboxes: dict[str, tk.Checkbutton] = {}
 
         self._build_widgets()
-        self._on_aoi_source_change()
+        self._on_granularity_change()
         self._poll_log_queue()
 
     # ------------------------------------------------------------------
@@ -156,37 +153,13 @@ class NightlightGUI:
         )
         row += 1
 
-        self.aoi_source = tk.StringVar(value="iso3")
-
-        ttk.Radiobutton(
-            frm,
-            text="ISO3 country code",
-            variable=self.aoi_source,
-            value="iso3",
-            command=self._on_aoi_source_change,
-        ).grid(row=row, column=0, sticky="w", **pad)
-        self.aoi_iso3 = tk.StringVar()
-        ttk.Entry(frm, textvariable=self.aoi_iso3, width=10).grid(row=row, column=1, sticky="w", **pad)
-        row += 1
-
-        ttk.Radiobutton(
-            frm,
-            text="Country/admin name (FAO GAUL)",
-            variable=self.aoi_source,
-            value="name",
-            command=self._on_aoi_source_change,
-        ).grid(row=row, column=0, sticky="w", **pad)
-        self.aoi_name = tk.StringVar()
-        ttk.Entry(frm, textvariable=self.aoi_name, width=30).grid(row=row, column=1, sticky="w", **pad)
-        row += 1
-
-        ttk.Radiobutton(
-            frm,
-            text="My own boundary file",
-            variable=self.aoi_source,
-            value="file",
-            command=self._on_aoi_source_change,
-        ).grid(row=row, column=0, sticky="w", **pad)
+        # --aoi-file is the only way to supply an AOI -- there's no built-in
+        # country/admin-name lookup (see nightlight_tool.py's module
+        # docstring), so this is just a boundary-file path and a browse
+        # button, not a choice between sources.
+        ttk.Label(frm, text="Boundary file (shapefile, GeoJSON, or geodatabase)").grid(
+            row=row, column=0, sticky="w", **pad
+        )
         self.aoi_file = tk.StringVar()
         ttk.Entry(frm, textvariable=self.aoi_file, width=40).grid(row=row, column=1, sticky="w", **pad)
         ttk.Button(frm, text="Browse...", command=self._on_browse_aoi_file).grid(row=row, column=2, **pad)
@@ -198,7 +171,7 @@ class NightlightGUI:
         ttk.Label(frm, text="Granularity").grid(row=row, column=0, sticky="w", **pad)
         self.granularity = tk.StringVar(value=ADMIN_LEVEL_LABELS[0])
         self.granularity_combo = ttk.Combobox(
-            frm, textvariable=self.granularity, values=GAUL_ADMIN_LEVEL_LABELS, state="readonly", width=38
+            frm, textvariable=self.granularity, values=ADMIN_LEVEL_LABELS, state="readonly", width=38
         )
         self.granularity_combo.grid(row=row, column=1, columnspan=2, sticky="w", **pad)
         self.granularity_combo.bind("<<ComboboxSelected>>", lambda e: self._on_granularity_change())
@@ -487,15 +460,8 @@ class NightlightGUI:
         return ttk.Entry(parent, textvariable=variable, width=14)
 
     # ------------------------------------------------------------------
-    # Dynamic enable/disable as the AOI source and granularity change
+    # Dynamic enable/disable as granularity changes
     # ------------------------------------------------------------------
-    def _on_aoi_source_change(self) -> None:
-        is_gaul = self.aoi_source.get() in ("iso3", "name")
-        self.granularity_combo["values"] = GAUL_ADMIN_LEVEL_LABELS if is_gaul else ADMIN_LEVEL_LABELS
-        if is_gaul and self.granularity.get() not in GAUL_ADMIN_LEVEL_LABELS:
-            self.granularity.set(ADMIN_LEVEL_LABELS[0])
-        self._on_granularity_change()
-
     def _on_vector_format_change(self, changed: str) -> None:
         # GeoJSON and Shapefile are two independent checkboxes rather than a
         # radio pair, precisely so both can be left unticked (no vector
@@ -510,29 +476,28 @@ class NightlightGUI:
     def _on_granularity_change(self) -> None:
         level = self.breakdown_level()
         breakdown_on = bool(level)
-        is_file = self.aoi_source.get() == "file"
 
         self._refresh_attribute_checkbox_states()
-        # "Load available columns" is only needed for the GAUL name/ISO3
-        # path -- picking a boundary file already auto-loads its columns
-        # (see _on_browse_aoi_file), so the button would just be a
-        # redundant, always-a-no-op-after-the-fact control there. Use
-        # grid()/grid_remove() rather than disabling it, so it's not just
-        # greyed out but actually gone when it wouldn't do anything.
-        if breakdown_on and not is_file:
+        # Picking a boundary file already auto-loads its columns (see
+        # _on_browse_aoi_file), so "Load available columns" is just a
+        # manual retry -- useful if that auto-load failed (unreadable file,
+        # unsupported format) or the file changed. Use grid()/grid_remove()
+        # rather than disabling it, so it's gone entirely until a breakdown
+        # level is actually chosen.
+        if breakdown_on:
             self.load_fields_button.grid()
         else:
             self.load_fields_button.grid_remove()
         # "normal" (editable), not "readonly" -- these need to stay typeable
         # even when "Load available columns" hasn't been clicked yet, or
-        # failed (unreadable file, unsupported format). Matching the
-        # wizard's own _prompt_single_field/_prompt_optional_field behavior:
-        # validate against the known column list when there is one, but
-        # never hard-block typing a name when there isn't.
-        combo_state = "normal" if (breakdown_on and is_file) else "disabled"
+        # failed. Matching the wizard's own _prompt_single_field/
+        # _prompt_optional_field behavior: validate against the known
+        # column list when there is one, but never hard-block typing a name
+        # when there isn't.
+        combo_state = "normal" if breakdown_on else "disabled"
         self.unit_name_combo.configure(state=combo_state)
         self.unit_id_combo.configure(state=combo_state)
-        self.simplify_entry.configure(state="normal" if (breakdown_on and is_file) else "disabled")
+        self.simplify_entry.configure(state="normal" if breakdown_on else "disabled")
 
     def breakdown_level(self) -> int:
         """0 for the whole-AOI option, 1-5 for Admin1-5."""
@@ -552,14 +517,12 @@ class NightlightGUI:
         if not path:
             return
         self.aoi_file.set(path)
-        self.aoi_source.set("file")
-        self._on_aoi_source_change()
+        self._on_granularity_change()
         # Auto-populate the breakdown columns (unit name/ID dropdowns, extra
         # attribute checkboxes) as soon as a file is chosen, rather than
         # making choosing a file and then clicking "Load available columns"
-        # two separate steps. Listing a file's columns is just local file IO
-        # (unlike the GAUL lookup below, it needs no admin level or Earth
-        # Engine call), so there's no reason to wait for those.
+        # two separate steps. Listing a file's columns is just local file
+        # IO, so there's no reason to wait for a click.
         try:
             fields = list_file_fields(path)
         except Exception as e:  # noqa: BLE001 -- non-fatal; "Load available columns" remains as a retry
@@ -585,27 +548,13 @@ class NightlightGUI:
         self._populate_field_widgets(fields)
 
     def _fetch_available_fields(self, level: int) -> list[str]:
-        """The network/file-IO part of _on_load_fields, split out so it can
-        be exercised directly (e.g. with a stubbed nightlight_tool) without
+        """The file-IO part of _on_load_fields, split out so it can be
+        exercised directly (e.g. with a stubbed nightlight_tool) without
         touching any widgets."""
-        source = self.aoi_source.get()
-        if source == "file":
-            path = self.aoi_file.get().strip()
-            if not path:
-                raise ValueError("Choose a boundary file first.")
-            return list_file_fields(path)
-
-        ee_project = self.ee_project.get().strip() or None
-        if source == "iso3":
-            iso3 = self.aoi_iso3.get().strip().upper()
-            if not iso3:
-                raise ValueError("Enter an ISO3 code first.")
-            name = resolve_iso3_to_gaul_name(iso3, ee_project)
-        else:
-            name = self.aoi_name.get().strip()
-            if not name:
-                raise ValueError("Enter a country/admin name first.")
-        return list_gaul_fields(name, f"admin{level}", ee_project)
+        path = self.aoi_file.get().strip()
+        if not path:
+            raise ValueError("Choose a boundary file first.")
+        return list_file_fields(path)
 
     def _populate_field_widgets(self, fields: list[str]) -> None:
         self.unit_name_combo["values"] = fields
@@ -703,9 +652,6 @@ class NightlightGUI:
     def _collect_fields(self) -> dict:
         selected_attrs = [name for name, var in self._attribute_vars.items() if var.get()]
         return {
-            "aoi_source": self.aoi_source.get(),
-            "aoi_iso3": self.aoi_iso3.get(),
-            "aoi_name": self.aoi_name.get(),
             "aoi_file": self.aoi_file.get(),
             "breakdown_level": self.breakdown_level(),
             "unit_name_field": self.unit_name_field.get(),

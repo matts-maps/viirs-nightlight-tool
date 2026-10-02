@@ -1,9 +1,11 @@
 # VIIRS Nightlight Tool
 
 A reusable command-line tool that extracts a VIIRS nighttime-lights radiance
-time series for any area of interest — a country, a sub-national unit, or a
-custom boundary you supply — over any date range and at daily, weekly,
-monthly, or annual frequency.
+time series for any area of interest — a country, a sub-national unit, or any
+other custom boundary — over any date range and at daily, weekly, monthly, or
+annual frequency. You always supply your own boundary file as the AOI (see
+[Area of interest: `--aoi-file`](#area-of-interest---aoi-file) below) — there's
+no built-in country/admin-name lookup.
 
 Built to be run by anyone, on any machine: it's plain Python with open-source
 dependencies, no ArcGIS/arcpy requirement, and no hardcoded paths. If you'd
@@ -13,7 +15,7 @@ arguments (or add `--wizard`) for an interactive prompt — see
 
 ## What it does
 
-Given an AOI, a start/end date, and a frequency, it queries
+Given your own boundary file as the AOI, a start/end date, and a frequency, it queries
 [Google Earth Engine](https://earthengine.google.com/) for VIIRS Day/Night
 Band radiance and writes one row per period to a CSV, with QA columns so you
 can judge how much to trust each value — plus an optional chart.
@@ -84,8 +86,8 @@ python nightlight_tool.py \
 
 If you don't want to look up flag names, run the tool with no arguments at
 all (or add `--wizard` to any invocation) and it will prompt you through each
-choice — AOI, granularity, attributes, date range, frequency, and output path
-— then run exactly as if you'd typed the equivalent flags:
+choice — boundary file, granularity, attributes, date range, frequency, and
+output path — then run exactly as if you'd typed the equivalent flags:
 
 ```bash
 python nightlight_tool.py
@@ -99,12 +101,12 @@ builds the flags for you, so anything documented below applies either way.
 ### GUI mode
 
 Prefer forms and dropdowns to a terminal? `nightlight_gui.py` is a Tkinter
-window with the same options as the wizard (AOI source, granularity,
+window with the same options as the wizard (boundary file, granularity,
 attribute/unit-ID columns), organized into sections: a **Timeframe** section
 (start/end date, frequency, dark-pixel threshold); an **Outputs** section —
-a geoextent code (always shown; automatic from an ISO3 AOI unless you
-override it, required otherwise), one shared output folder for everything,
-and checkboxes for which outputs to produce (CSV is always on; Vector as
+a geoextent code (always shown and always required, since the boundary file
+has no code of its own to default to), one shared output folder for
+everything, and checkboxes for which outputs to produce (CSV is always on; Vector as
 GeoJSON and/or Shapefile checkboxes, both untickable for no vector output;
 Rasters as independent whole-AOI-radiance and year-over-year-diff
 checkboxes, sharing one resolution field; Chart) — and a separate
@@ -146,65 +148,51 @@ Like the wizard, the GUI is a thin front end over the exact same
 `build_arg_parser()`/`main()` path the CLI uses underneath — it just collects
 your choices into a form instead of prompts, then runs the query in a
 background thread so the window doesn't freeze while Earth Engine works,
-streaming progress into the log panel at the bottom. Choosing your own
-boundary file unlocks Admin 3–5 granularity and the unit-name/unit-ID/simplify
-fields, same as in the wizard, and auto-loads its columns into the
-unit-name/unit-ID dropdowns and a scrollable, tickable checklist of extra
-`--attributes` columns as soon as you pick the file — no separate "Load
-available columns" click needed. For a GAUL country/name lookup, where
-there's no file to auto-trigger from, the "Load available columns" button
-(which needs Earth Engine set up already) still does the same job.
+streaming progress into the log panel at the bottom. Picking your boundary
+file unlocks the Granularity dropdown (Admin 0–5) and the
+unit-name/unit-ID/simplify fields, same as in the wizard, and auto-loads its
+columns into the unit-name/unit-ID dropdowns and a scrollable, tickable
+checklist of extra `--attributes` columns as soon as you pick the file — no
+separate "Load available columns" click needed (that button is still there
+as a manual retry, e.g. if the file changes or the first read failed).
 
 When you choose to break down by admin unit, the wizard looks up and prints
-the actual fields available before asking which to include as
-`--attributes` columns — the columns in your file for `--aoi-file`, or the
-GAUL properties (e.g. `ADM0_NAME`, `ADM1_CODE`) for `--aoi-name` (this needs
-Earth Engine set up already, per step 2 above, since it queries GAUL live).
+the actual fields available in your file before asking which to include as
+`--attributes` columns.
 
-Or by admin-unit name instead of a boundary file (looked up against
-Earth Engine's FAO GAUL admin boundaries, country → admin-1 → admin-2):
+### Area of interest: `--aoi-file`
+
+`--aoi-file` is the only way to supply an area of interest — there's no
+built-in country or admin-name lookup, so bring your own boundary (a
+GeoJSON, shapefile, or geodatabase layer). For a specific sub-unit (e.g. one
+raion), get a proper boundary from a source like
+[fieldmaps.io](https://fieldmaps.io), [HDX COD](https://data.humdata.org/),
+or [GADM](https://gadm.org):
 
 ```bash
-python nightlight_tool.py --aoi-name "Ukraine" \
+python nightlight_tool.py --aoi-file ukraine_oblasts.geojson \
     --start 2021-01-01 --end 2026-09-01 --freq annual \
-    --out-dir out --geoextent UKR
+    --out-dir out --geoextent ukr
 ```
-
-Or by ISO 3166-1 alpha-3 country code, which sidesteps having to know GAUL's
-exact country-name spelling:
-
-```bash
-python nightlight_tool.py --aoi-iso3 UKR \
-    --start 2021-01-01 --end 2026-09-01 --freq annual --out-dir out
-```
-
-`--aoi-iso3` resolves the code to a country name and matches it against GAUL
-automatically (GAUL boundaries don't carry ISO codes themselves) — it prints
-which GAUL country name it matched to, so you can confirm it got the right
-one. If no confident match is found (rare, but possible for a country whose
-GAUL name is unusual), it errors out and tells you to use `--aoi-name` with
-the exact GAUL name instead.
 
 ### Arguments
 
 | Flag | Required | Notes |
 |---|---|---|
-| `--aoi-file` | one of `--aoi-file` / `--aoi-name` / `--aoi-iso3` | path to a GeoJSON/shapefile/etc. — for a specific sub-unit (e.g. one raion), get a proper boundary from a source like [fieldmaps.io](https://fieldmaps.io), [HDX COD](https://data.humdata.org/), or [GADM](https://gadm.org) |
-| `--aoi-name` | — | admin name to look up, e.g. `"Ukraine"`, or an admin-1/2 name |
-| `--aoi-iso3` | — | ISO 3166-1 alpha-3 country code, e.g. `UKR` — resolved to a GAUL country name automatically |
+| `--aoi-file` | yes | path to a GeoJSON/shapefile/etc. — the only way to supply an AOI (see above) |
 | `--start`, `--end` | yes | ISO dates, `--end` is exclusive |
 | `--freq` | yes | `daily`, `weekly`, `monthly`, or `annual` |
-| `--out-dir` | yes | output folder for every output this run produces (CSV, vector, rasters, chart) — filenames are built from `--geoextent`/`--aoi-iso3` |
-| `--geoextent` | no | geoextent code used in every output filename — required with `--aoi-file`/`--aoi-name`; automatic from `--aoi-iso3` |
+| `--out-dir` | yes | output folder for every output this run produces (CSV, vector, rasters, chart) |
+| `--geoextent` | yes | geoextent code used in every output filename — always required, since `--aoi-file` has no code of its own to default to |
 | `--vector-out` | no | `geojson` or `shapefile` — also write spatial output joined to the boundary geometry by the unit's unique ID/pcode, in addition to the CSV — one file per period plus one combined file with every period (see below) |
 | `--chart` | no | also write a PNG chart next to the CSV — one line chart for a single AOI, or a small-multiples grid (one mini chart per unit) with `--breakdown` (see below) |
 | `--chart-units` | no | comma-separated exact values from the output's unit-name column to chart, when using `--chart` with `--breakdown` (see below) |
 | `--ee-project` | no | your Earth Engine cloud project ID, if required (see step 2) |
-| `--breakdown` | no | `admin1`–`admin5` — output one row per sub-unit per period instead of one row per period (see below). With `--aoi-name`/`--aoi-iso3`, only `admin1`/`admin2` are available (that's as far down as FAO GAUL goes); `admin3`–`admin5` need `--aoi-file` |
-| `--unit-name-field` | no | required alongside `--breakdown` when using `--aoi-file` (see below) |
+| `--breakdown` | no | `admin1`–`admin5` — output one row per sub-unit per period instead of one row per period (see below). The admin level is just a label for the output — any of admin1-5 works, however your boundary file is actually organized |
+| `--unit-name-field` | required alongside `--breakdown` | names the column/property in `--aoi-file` to label each unit with (see below) |
 | `--unit-id-field` | no | column in `--aoi-file` holding each unit's unique ID, typically a pcode (see below) |
 | `--attributes` | no | comma-separated field/column names to include as extra columns in `--breakdown` output (see below) |
-| `--simplify-tolerance` | no | simplify `--aoi-file` geometries by this many degrees before sending to Earth Engine — only relevant to `--breakdown --aoi-file` with a detailed layer (see below) |
+| `--simplify-tolerance` | no | simplify `--aoi-file` geometries by this many degrees before sending to Earth Engine — only relevant to `--breakdown` with a detailed layer (see below) |
 | `--include-yoy` | no | add `<stat>_yoy_abs`/`<stat>_yoy_pct` columns — each row vs. the same period one year back (see below) |
 | `--dark-threshold` | no | radiance (nW/cm²/sr) below which a pixel counts as "dark" for the `pct_dark` column — default `0.5` (see below) |
 | `--raster-whole-aoi` | no | also export a whole-AOI radiance GeoTIFF per period, written into `--out-dir` — independent of `--raster-yoy` (see below) |
@@ -216,37 +204,32 @@ the exact GAUL name instead.
 
 Instead of one AOI-wide number per period, `--breakdown` gives you one row per
 admin unit per period — e.g. every governorate or district in a country, each
-with its own radiance trend:
+with its own radiance trend. Add `--unit-name-field` to say which
+column/property in your `--aoi-file` holds each unit's name:
 
 ```bash
-python nightlight_tool.py --aoi-name "Yemen" \
+python nightlight_tool.py --aoi-file yemen_governorates.geojson --unit-name-field ADM1_NAME \
     --start 2014-01-01 --end 2023-01-01 --freq annual \
     --out-dir out --geoextent yem --breakdown admin1 --ee-project ee-masims
 ```
 
-This looks up FAO GAUL admin1 (governorate/oblast-level) or admin2
-(district/raion-level) units within that country, and queries all of them for
-each period in a single Earth Engine call (not one call per unit — that
-matters once you're at admin2 scale, which can be hundreds of units).
-`--aoi-name`/`--aoi-iso3` only go down to admin2, since that's as far as FAO
-GAUL carries boundaries — for admin3 (commune/ward), admin4, or admin5, supply
-your own boundary file with `--aoi-file` instead (see below); there the admin
-level you pass is just a label, since every feature in the file is already
-its own unit regardless of which government tier it represents.
+This queries every feature in your boundary file for each period in a single
+Earth Engine call (not one call per unit — that matters once you're at
+admin2 scale, which can be hundreds of units). `--breakdown admin1`/`admin2`/
+etc. is just a label for the output — every feature in the file is kept
+separate regardless of which admin level you name, so `admin3`–`admin5` work
+exactly the same way, however your boundary file is actually organized.
 
-Output columns add the unit's name and ID (named after whichever GAUL field
-actually produced them — `ADM1_NAME`/`ADM1_CODE` for `--breakdown admin1`,
-`ADM2_NAME`/`ADM2_CODE` for `admin2` — filled in automatically, so they're
-always populated with `--aoi-name`), plus `admin0_name`/`admin1_name`/
-`admin2_name` (blank where not applicable) alongside the usual radiance/QA
-columns — so you can pivot or join straight into a spreadsheet or GIS.
-`--chart` in this mode
-writes a small-multiples PNG (one mini chart per unit) instead of a single
-shared chart, since one line per district isn't legible once there are more
-than a handful:
+Output columns add the unit's name and ID (named after the
+`--unit-name-field`/`--unit-id-field` columns you pointed at) alongside the
+usual radiance/QA columns — so you can pivot or join straight into a
+spreadsheet or GIS. `--chart` in this mode writes a small-multiples PNG (one
+mini chart per unit) instead of a single shared chart, since one line per
+district isn't legible once there are more than a handful:
 
 ```bash
-python nightlight_tool.py --aoi-name "Yemen" --breakdown admin1 \
+python nightlight_tool.py --aoi-file yemen_governorates.geojson --unit-name-field ADM1_NAME \
+    --breakdown admin1 \
     --start 2014-01-01 --end 2023-01-01 --freq annual \
     --out-dir out --geoextent yem --chart --ee-project ee-masims
 ```
@@ -256,7 +239,8 @@ If there are more than 30 units, `--chart` charts the first 30 and warns you
 values, comma-separated):
 
 ```bash
-python nightlight_tool.py --aoi-name "Yemen" --breakdown admin1 \
+python nightlight_tool.py --aoi-file yemen_governorates.geojson --unit-name-field ADM1_NAME \
+    --breakdown admin1 \
     --start 2014-01-01 --end 2023-01-01 --freq annual \
     --out-dir out --geoextent yem --chart --chart-units "Sana'a,Aden,Ta'izz" \
     --ee-project ee-masims
@@ -264,20 +248,6 @@ python nightlight_tool.py --aoi-name "Yemen" --breakdown admin1 \
 
 (A deliberate `--chart-units` selection is never truncated, however many you
 list — the 30-panel cap only applies to the "chart everything" default.)
-
-You can also break down a boundary file you supply yourself instead of a GAUL
-lookup, by adding `--unit-name-field` to say which column/property in the file
-holds each unit's name:
-
-```bash
-python nightlight_tool.py --aoi-file crimea_raions.geojson --unit-name-field raion_name \
-    --start 2021-01-01 --end 2023-01-01 --freq monthly \
-    --out-dir out --geoextent crm --breakdown admin2 --ee-project ee-masims
-```
-
-(Here `--breakdown admin2` is just a label for the output — with `--aoi-file`,
-every feature in the file is kept separate regardless of which admin level
-you name.)
 
 #### Giving each unit a stable ID: `--unit-id-field`
 
@@ -301,30 +271,20 @@ in the example above, not a generic `unit_id`/`unit_name`), so you can join
 back onto other datasets (or your GIS layer) by the stable code rather than a
 name that might not match exactly. It's optional but recommended whenever
 names might collide; if you skip it, the ID column just comes back as
-`unit_id` with every value blank. With `--aoi-name` (GAUL), you don't need
-this at all — the ID column is filled in for you automatically from GAUL's
-`ADM1_CODE`/`ADM2_CODE`, and named accordingly. The interactive `--wizard`
-asks for this right after the unit-name column.
+`unit_id` with every value blank. The interactive `--wizard` asks for this
+right after the unit-name column.
 
 #### Choosing which attributes end up in the output: `--attributes`
 
-By default, `--breakdown` output includes `admin0_name`/`admin1_name`/
-`admin2_name` when using `--aoi-name` (GAUL), and just the unit-name column
-when using `--aoi-file`. That's not always enough — e.g. Venezuela has
-several municipios that share the same name across different states, so the
-unit name alone can't tell them apart in the CSV.
+By default, `--breakdown` output includes just the unit-name/unit-id columns.
+That's not always enough — e.g. Venezuela has several municipios that share
+the same name across different states, so the unit name alone can't tell
+them apart in the CSV.
 
-`--attributes` lets you pick exactly which fields from the admin/boundary
-data become columns instead:
+`--attributes` lets you pick exactly which columns from your boundary file
+become columns in the output instead:
 
 ```bash
-# GAUL: use GAUL's own property names
-python nightlight_tool.py --aoi-name "Venezuela" --breakdown admin2 \
-    --attributes ADM0_NAME,ADM1_NAME \
-    --start 2024-09-01 --end 2026-09-01 --freq monthly \
-    --out-dir out --geoextent ven --ee-project ee-masims
-
-# --aoi-file: use column names from your own file
 python nightlight_tool.py --aoi-file ven_admin2.geojson --unit-name-field adm2_name \
     --attributes adm1_name,adm1_pcode --breakdown admin2 \
     --start 2024-09-01 --end 2026-09-01 --freq monthly \
@@ -333,11 +293,8 @@ python nightlight_tool.py --aoi-file ven_admin2.geojson --unit-name-field adm2_n
 
 When `--attributes` is given, it fully replaces the default columns — you get
 exactly the fields you named (plus your unit-name/unit-id columns), so include
-whatever parent name/code field disambiguates your units. With `--aoi-file`, an unknown
-column name fails fast with the list of columns actually in your file; with
-`--aoi-name`, an unrecognised GAUL property name just comes back blank rather
-than erroring (GAUL's property names vary slightly by asset — check a sample
-feature if a column you expect isn't showing up).
+whatever parent name/code field disambiguates your units. An unknown column
+name fails fast with the list of columns actually in your file.
 
 #### Large/detailed boundary files: `--simplify-tolerance`
 
@@ -436,7 +393,7 @@ the same ISO week number a year earlier for `--freq weekly`; February 29
 and ISO week 53 are skipped when there's no matching date a year back):
 
 ```bash
-python nightlight_tool.py --aoi-iso3 UKR \
+python nightlight_tool.py --aoi-file ukraine_oblasts.geojson --geoextent ukr \
     --start 2022-01-01 --end 2023-01-01 --freq monthly \
     --out-dir out --include-yoy --ee-project ee-masims
 ```
@@ -472,7 +429,7 @@ region, and what counts as "dark" for your analysis — so pick a value that
 matches your own work and set it explicitly:
 
 ```bash
-python nightlight_tool.py --aoi-iso3 UKR \
+python nightlight_tool.py --aoi-file ukraine_oblasts.geojson --geoextent ukr \
     --start 2022-01-01 --end 2023-01-01 --freq monthly \
     --out-dir out --dark-threshold 0.3 --ee-project ee-masims
 ```
@@ -483,7 +440,7 @@ python nightlight_tool.py --aoi-iso3 UKR \
 written into `--out-dir` — there's no separate output location to set:
 
 ```bash
-python nightlight_tool.py --aoi-iso3 UKR \
+python nightlight_tool.py --aoi-file ukraine_oblasts.geojson --geoextent ukr \
     --start 2022-01-01 --end 2022-04-01 --freq monthly \
     --out-dir out --raster-whole-aoi --ee-project ee-masims
 ```
@@ -497,7 +454,7 @@ columns** — turn on either raster flag, both, or neither, regardless of
 whether `--include-yoy` is set:
 
 ```bash
-python nightlight_tool.py --aoi-iso3 UKR \
+python nightlight_tool.py --aoi-file ukraine_oblasts.geojson --geoextent ukr \
     --start 2022-01-01 --end 2022-04-01 --freq monthly \
     --out-dir out --raster-yoy --ee-project ee-masims
 ```
@@ -509,9 +466,8 @@ Filenames follow a fixed, all-underscore template:
 ```
 
 `{geoextent}` is a short code identifying the AOI, used in every output
-filename (CSV, vector, and raster alike) — automatic from `--aoi-iso3` (e.g.
-`ukr`), but **required via `--geoextent`** when using `--aoi-file` or
-`--aoi-name`, since those have no ISO3 code of their own:
+filename (CSV, vector, and raster alike) — always **required via
+`--geoextent`**, since `--aoi-file` has no code of its own to default to:
 
 ```bash
 python nightlight_tool.py --aoi-file crimea_raions.geojson \
@@ -581,43 +537,34 @@ correctly, before spending an Earth Engine call on a real AOI.
   before, so if daily numbers look implausible, check the current VNP46A2
   User Guide's `QF_Cloud_Mask` bit table against the constants in
   `nightlight_tool.py`.
-- GAUL admin boundaries (used for `--aoi-name` lookups) are a general-purpose
-  reference dataset and may not reflect current or contested administrative
-  boundaries precisely — for anything Crimea/Ukraine-specific, supply your
-  own `--aoi-file` from a source you trust instead.
-- GAUL's admin2 coverage is incomplete for some countries, **including
-  Ukraine**: `--aoi-name "Ukraine" --breakdown admin2` returns one row per
-  oblast (admin1) with `admin2_name` set to the literal placeholder
-  `"Administrative unit not available"` and stats identical to the parent
-  oblast — GAUL simply has no real raion-level (admin2) data for Ukraine to
-  return. This is a data-source gap, not a bug in this tool. For genuine
-  raion-level breakdowns, use `--aoi-file` with a real boundary source (e.g.
-  [fieldmaps.io](https://fieldmaps.io) or [HDX COD](https://data.humdata.org/))
-  and `--unit-name-field`, combined with `--simplify-tolerance` if needed
-  (see above).
+- There's no built-in country/admin-name lookup — you always supply your own
+  `--aoi-file`. For anything Crimea/Ukraine-specific, use a boundary source
+  you trust (e.g. [fieldmaps.io](https://fieldmaps.io) or
+  [HDX COD](https://data.humdata.org/)), since a general-purpose global
+  reference dataset may not reflect current or contested administrative
+  boundaries precisely, or may have incomplete raion-level coverage for
+  Ukraine specifically.
 
 ## Roadmap
 
 Towards a tool anyone can pick up without reading this whole README first:
 
-- **Fieldmaps.io/global-dataset AOI picker** — `--aoi-iso3` (see above) covers
-  unambiguous country selection; a fuller country dropdown backed by
-  fieldmaps.io and/or the latest GAUL release, plus admin1/2-level lookups
-  by code rather than name, is the next step.
 - **Geodatabase (`.gdb`) input** — `--aoi-file`/`--unit-name-field` currently
   read via `geopandas`, which supports `.gdb`, but this hasn't been tested or
   documented as a supported input format yet.
 - **Baseline-period change detection** — `--include-yoy` covers
   year-over-year; a fixed, user-chosen baseline period (e.g. a pre-war
   average) to compare every row against is still open.
+
 Already delivered towards the "anyone can use it" goal: `--wizard` interactive
-mode (which also shows the actual admin-data fields available before you pick
-`--attributes`), `weekly` frequency, `--attributes` for choosing output
-columns, `--aoi-iso3` for unambiguous country selection, small-multiples
-`--chart` support in `--breakdown` mode (`--chart-units` to pick specific
-units), `--vector-out` for a joined spatial output (GeoJSON/shapefile),
-year-over-year change columns (`--include-yoy`), a dark-pixel/blackout
-indicator (`pct_dark`, `--dark-threshold`), whole-AOI and year-over-year-diff
-raster export (`--raster-whole-aoi`, `--raster-yoy`), and a GUI Outputs
-section (one shared output folder, a geoextent/ISO3 code, and checkboxes for
-which outputs to produce).
+mode (which also shows the actual fields available in your boundary file
+before you pick `--attributes`), `weekly` frequency, `--attributes` for
+choosing output columns, small-multiples `--chart` support in `--breakdown`
+mode (`--chart-units` to pick specific units), `--vector-out` for a joined
+spatial output (GeoJSON/shapefile), year-over-year change columns
+(`--include-yoy`), a dark-pixel/blackout indicator (`pct_dark`,
+`--dark-threshold`), whole-AOI and year-over-year-diff raster export
+(`--raster-whole-aoi`, `--raster-yoy`), a GUI Outputs section (one shared
+output folder, a geoextent code, and checkboxes for which outputs to
+produce), and removing the ISO3/GAUL country-lookup path in favor of
+requiring your own `--aoi-file` everywhere (CLI, wizard, GUI).

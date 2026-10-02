@@ -2,9 +2,9 @@
 """
 nightlight_tool.py — VIIRS nighttime-lights time series for any area of interest.
 
-Given an area of interest (a boundary file, or a country/admin-unit name), a date
-range, and a frequency, this pulls VIIRS Day/Night Band radiance from Google Earth
-Engine and writes a per-period time series (CSV + a quick chart PNG).
+Given an area of interest (your own boundary file), a date range, and a frequency,
+this pulls VIIRS Day/Night Band radiance from Google Earth Engine and writes a
+per-period time series (CSV + a quick chart PNG).
 
 Quick start
 -----------
@@ -309,22 +309,18 @@ def build_raster_filename(geoextent: str, freetext: str) -> str:
     )
 
 
-def resolve_geoextent(aoi_iso3: Optional[str], geoextent: Optional[str]) -> str:
+def resolve_geoextent(geoextent: Optional[str]) -> str:
     """Pure function: the geoextent code to use in every output filename
-    (CSV, vector, raster) -- the ISO3 code automatically when --aoi-iso3
-    was used, otherwise whatever --geoextent supplied (required in that
-    case, since --aoi-file/--aoi-name have no ISO3 of their own). Raises
-    ValueError with a message fit to print directly when neither is
-    available.
+    (CSV, vector, raster). Every AOI comes from --aoi-file now, which has
+    no code of its own to default to, so --geoextent is always required.
+    Raises ValueError with a message fit to print directly when it's
+    missing.
     """
-    if aoi_iso3:
-        return aoi_iso3
     if geoextent:
         return geoextent
     raise ValueError(
-        "A geoextent code is needed for output filenames -- this is automatic with "
-        "--aoi-iso3, but --aoi-file/--aoi-name need --geoextent set explicitly "
-        "(e.g. --geoextent UKR)."
+        "A geoextent code is needed for output filenames -- pass --geoextent "
+        "(e.g. --geoextent crm)."
     )
 
 
@@ -381,19 +377,16 @@ def build_breakdown_row(
     one in tests) — this function makes no Earth Engine calls itself, which is what
     keeps it unit-testable without an EE session.
 
-    `attribute_fields`, when given, names the exact properties/columns from the
-    admin/boundary data to carry into the output as their own columns (e.g.
-    ["ADM0_NAME", "ADM1_NAME"] for GAUL, or user-chosen column names from an
-    --aoi-file). This is how the caller picks what ends up in the CSV instead of
-    always getting the three hardcoded GAUL admin-name columns below, which stay
-    as the default for backward compatibility when no fields are requested.
+    `attribute_fields`, when given, names the exact properties/columns (from
+    --aoi-file, via --attributes) to carry into the output as their own
+    columns. If omitted, no extra columns are added beyond unit_name/unit_id.
 
     `unit_id` (in `feature_properties`) is always surfaced as its own column,
-    separate from `attribute_fields` -- it's the stable, unique identifier for
-    the unit (a GAUL ADM*_CODE, or whichever column the user pointed at as a
-    unique key, e.g. a pcode) as opposed to `unit_name`, which is
-    human-readable but not guaranteed unique (two municipios can share a
-    name). It's None when the caller didn't have one to set.
+    separate from `attribute_fields` -- it's the stable, unique identifier
+    for the unit (whichever column the user pointed at as a unique key, e.g.
+    a pcode) as opposed to `unit_name`, which is human-readable but not
+    guaranteed unique (two municipios can share a name). It's None when the
+    caller didn't have one to set.
     """
     row: dict = {
         "period": period_label,
@@ -403,10 +396,6 @@ def build_breakdown_row(
     if attribute_fields:
         for field in attribute_fields:
             row[field] = feature_properties.get(field)
-    else:
-        row["admin0_name"] = feature_properties.get("ADM0_NAME")
-        row["admin1_name"] = feature_properties.get("ADM1_NAME")
-        row["admin2_name"] = feature_properties.get("ADM2_NAME")
     row.update(
         {
             "mean_radiance": _get_stat(feature_properties, band, "mean"),
@@ -628,131 +617,26 @@ def write_chart(rows: list[dict], chart_path: Path, value_field: str = "mean_rad
     plt.close(fig)
 
 
-def resolve_iso3_candidate_names(iso3: str) -> list[str]:
-    """Pure function: given an ISO 3166-1 alpha-3 code, return candidate country
-    name strings to try against FAO GAUL's ADM0_NAME field.
-
-    GAUL boundaries don't carry ISO codes themselves, and pycountry's own name
-    fields often don't match GAUL's exact ADM0_NAME string either (e.g. for
-    COD, pycountry's `name` is "Congo, The Democratic Republic of the" while
-    GAUL uses "Democratic Republic of the Congo") -- so this returns several
-    candidates (common/short name, full name, official name) for the caller
-    to try in turn, with a final fallback match against the live GAUL country
-    list happening on the Earth Engine side (see resolve_iso3_to_gaul_name).
-
-    Raises ValueError for a code pycountry doesn't recognise. No `ee` import
-    here, so this half is unit-testable offline like the rest of this section.
-    """
-    import pycountry
-
-    country = pycountry.countries.get(alpha_3=iso3.upper())
-    if country is None:
-        raise ValueError(
-            f"{iso3!r} is not a recognised ISO 3166-1 alpha-3 country code "
-            "(e.g. 'UKR', 'USA', 'KOR')."
-        )
-    candidates = []
-    for attr in ("common_name", "name", "official_name"):
-        val = getattr(country, attr, None)
-        if val and val not in candidates:
-            candidates.append(val)
-    return candidates
-
-
 # ---------------------------------------------------------------------------
 # Earth Engine glue — only this half touches `ee`.
 # ---------------------------------------------------------------------------
 
-def _ensure_ee_initialized(ee_project: Optional[str] = None) -> None:
-    """Initialize Earth Engine if it isn't already, used by the wizard's live
-    lookups which can run before main()'s own ee.Initialize() call."""
-    import ee
-
-    try:
-        ee.data.getAssetRoots()
-    except Exception:  # noqa: BLE001 -- not yet initialized
-        if ee_project:
-            ee.Initialize(project=ee_project)
-        else:
-            ee.Initialize()
-
-
-def resolve_iso3_to_gaul_name(iso3: str, ee_project: Optional[str] = None) -> str:
-    """Match an ISO3 code to the exact ADM0_NAME string FAO GAUL uses for that
-    country. Tries resolve_iso3_candidate_names()'s candidates as exact
-    matches first, then falls back to a case-insensitive match against GAUL's
-    actual country list (GAUL level0 is only ~250 features, small enough to
-    pull client-side for this). Raises ValueError, listing what was tried,
-    if nothing lines up -- at that point --aoi-name with the exact GAUL name
-    is the fallback.
+def resolve_aoi_geometry(aoi_file: str):
+    """Return an ee.Geometry for the AOI, dissolved from the supplied
+    boundary file. The only AOI source this tool supports -- see the module
+    docstring and README for why automatic country/admin-name lookups
+    (formerly --aoi-iso3/--aoi-name against FAO GAUL) were dropped.
     """
     import ee
+    import geopandas as gpd
 
-    _ensure_ee_initialized(ee_project)
-    candidates = resolve_iso3_candidate_names(iso3)
-    gaul0 = ee.FeatureCollection("FAO/GAUL/2015/level0")
-
-    for name in candidates:
-        if gaul0.filter(ee.Filter.eq("ADM0_NAME", name)).size().getInfo() > 0:
-            return name
-
-    all_names = gaul0.aggregate_array("ADM0_NAME").getInfo()
-    lower_map = {n.lower(): n for n in all_names}
-    for name in candidates:
-        hit = lower_map.get(name.lower())
-        if hit:
-            return hit
-
-    for name in candidates:
-        substring_matches = [
-            n for n in all_names if name.lower() in n.lower() or n.lower() in name.lower()
-        ]
-        if len(substring_matches) == 1:
-            return substring_matches[0]
-
-    raise ValueError(
-        f"Could not match ISO3 {iso3!r} to a FAO GAUL country name. Tried: "
-        f"{candidates}. Use --aoi-name with the exact GAUL ADM0_NAME instead "
-        "-- inspect FAO/GAUL/2015/level0's ADM0_NAME values if you're not "
-        "sure what GAUL calls it."
-    )
-
-
-def resolve_aoi_geometry(aoi_file: Optional[str], aoi_name: Optional[str]):
-    """Return an ee.Geometry for the AOI, from a boundary file or a name lookup."""
-    import ee
-
-    if aoi_file:
-        import geopandas as gpd
-
-        gdf = gpd.read_file(aoi_file)
-        if gdf.crs is not None and gdf.crs.to_epsg() != 4326:
-            gdf = gdf.to_crs(epsg=4326)
-        # Dissolve to a single geometry so multi-feature files (e.g. several
-        # raions) are treated as one AOI, matching the --aoi-name behaviour.
-        geom = gdf.union_all() if hasattr(gdf, "union_all") else gdf.unary_union
-        return ee.Geometry(geom.__geo_interface__)
-
-    if aoi_name:
-        # Try country level first (GAUL level 0), then admin-1, then admin-2.
-        candidates = [
-            ("FAO/GAUL/2015/level0", "ADM0_NAME"),
-            ("FAO/GAUL/2015/level1", "ADM1_NAME"),
-            ("FAO/GAUL/2015/level2", "ADM2_NAME"),
-        ]
-        for asset_id, name_field in candidates:
-            fc = ee.FeatureCollection(asset_id).filter(
-                ee.Filter.eq(name_field, aoi_name)
-            )
-            if fc.size().getInfo() > 0:
-                return fc.geometry()
-        raise ValueError(
-            f"No GAUL admin boundary matched {aoi_name!r} at country, admin-1, "
-            "or admin-2 level. Check spelling/capitalisation, or supply "
-            "--aoi-file instead."
-        )
-
-    raise ValueError("Must supply either --aoi-file or --aoi-name")
+    gdf = gpd.read_file(aoi_file)
+    if gdf.crs is not None and gdf.crs.to_epsg() != 4326:
+        gdf = gdf.to_crs(epsg=4326)
+    # Dissolve to a single geometry so multi-feature files (e.g. several
+    # raions) are treated as one AOI.
+    geom = gdf.union_all() if hasattr(gdf, "union_all") else gdf.unary_union
+    return ee.Geometry(geom.__geo_interface__)
 
 
 def daily_pixel_quality_mask(image):
@@ -892,46 +776,13 @@ def simplify_geometry(geom, tolerance: Optional[float]):
     return geom.simplify(tolerance, preserve_topology=True)
 
 
-GAUL_BREAKDOWN_LEVELS: dict[str, tuple[str, str, str]] = {
-    "admin1": ("FAO/GAUL/2015/level1", "ADM1_NAME", "ADM1_CODE"),
-    "admin2": ("FAO/GAUL/2015/level2", "ADM2_NAME", "ADM2_CODE"),
-}
-
-
-def _unsupported_gaul_level_error(breakdown: str) -> ValueError:
-    return ValueError(
-        f"--breakdown {breakdown} isn't available with --aoi-name/--aoi-iso3 -- "
-        "FAO GAUL 2015 only carries admin1 and admin2 below the country level. "
-        "For finer units (admin3+), supply your own boundary file with --aoi-file "
-        "instead (the admin level there is just a label for the output)."
-    )
-
-
-def gaul_unit_name_id_fields(breakdown: str) -> tuple[str, str]:
-    """Return (name_field, id_field) -- the GAUL property names that back
-    unit_name/unit_id for a given --breakdown level with --aoi-name/--aoi-iso3
-    (e.g. ("ADM1_NAME", "ADM1_CODE") for admin1).
-
-    This is the same lookup resolve_breakdown_collection() uses internally to
-    build the feature collection, exposed separately so main() can also use
-    it -- to name the output CSV's unit_name/unit_id columns after whichever
-    field actually produced them (see rename_unit_columns()) -- without a
-    second, drifting copy of the admin-level table.
-    """
-    if breakdown not in GAUL_BREAKDOWN_LEVELS:
-        raise _unsupported_gaul_level_error(breakdown)
-    _, name_field, id_field = GAUL_BREAKDOWN_LEVELS[breakdown]
-    return name_field, id_field
-
-
 def rename_unit_columns(
     rows: list[dict], unit_name_column: str, unit_id_column: Optional[str]
 ) -> list[dict]:
     """Pure function: rename the generic 'unit_name'/'unit_id' keys in each
     row to whichever column actually identifies each unit -- e.g. 'adm2_name'
-    and 'adm2_pcode' for a --unit-name-field/--unit-id-field pair, or
-    'ADM1_NAME'/'ADM1_CODE' for a GAUL admin1 breakdown -- so the CSV header
-    says what the values actually are instead of a generic label.
+    and 'adm2_pcode' for a --unit-name-field/--unit-id-field pair -- so the
+    CSV header says what the values actually are instead of a generic label.
 
     This is a presentation-only rename applied right before the CSV is
     written. Every other part of the tool (charting, --chart-units matching,
@@ -1107,8 +958,7 @@ def write_geo_outputs_combined(rows: list[dict], out_path: Path) -> Path:
 
 
 def resolve_breakdown_collection(
-    aoi_file: Optional[str],
-    aoi_name: Optional[str],
+    aoi_file: str,
     breakdown: str,
     unit_name_field: Optional[str],
     simplify_tolerance: Optional[float] = None,
@@ -1118,92 +968,67 @@ def resolve_breakdown_collection(
     """Return an ee.FeatureCollection of sub-units to break the analysis down by,
     each carrying a 'unit_name' property.
 
-    --aoi-name + --breakdown: looks up FAO GAUL admin1/admin2 units within that
-    country. --aoi-file + --breakdown: keeps every feature in the file separate
-    (rather than dissolving them, like the single-AOI path does) and labels each
-    from --unit-name-field.
+    Keeps every feature in --aoi-file separate (rather than dissolving them,
+    like the single-AOI path does) and labels each from --unit-name-field.
 
     `attribute_fields`, when given, are extra property/column names to carry
     through onto each unit so they end up as columns in the output (see
-    build_breakdown_row). GAUL features already carry their admin-name/code
-    properties natively, so nothing extra is needed there; for --aoi-file the
-    requested columns are read from the boundary file and validated here, the
-    same way --unit-name-field already is.
+    build_breakdown_row) -- read from the boundary file and validated here,
+    the same way --unit-name-field already is.
 
     Every unit also gets a 'unit_id' property -- a stable, unique identifier,
     as opposed to 'unit_name' which is only meant to be human-readable and can
-    collide (two municipios sharing a name in different states, say). For
-    --aoi-name this is filled in automatically from GAUL's own ADM1_CODE/
-    ADM2_CODE, since those always exist. For --aoi-file it comes from
-    `unit_id_field` -- typically a pcode column -- which is optional but
-    strongly recommended whenever unit names might not be unique; when it's
-    not given, 'unit_id' is left None for every unit.
+    collide (two municipios sharing a name in different states, say). It
+    comes from `unit_id_field` -- typically a pcode column -- which is
+    optional but strongly recommended whenever unit names might not be
+    unique; when it's not given, 'unit_id' is left None for every unit.
     """
     import ee
 
-    if aoi_name:
-        if breakdown not in GAUL_BREAKDOWN_LEVELS:
-            raise _unsupported_gaul_level_error(breakdown)
-        asset_id, name_field, id_field = GAUL_BREAKDOWN_LEVELS[breakdown]
-        fc = ee.FeatureCollection(asset_id).filter(ee.Filter.eq("ADM0_NAME", aoi_name))
-        count = fc.size().getInfo()
-        if count == 0:
-            raise ValueError(
-                f"No {breakdown} units found for country name {aoi_name!r} in "
-                f"{asset_id}. GAUL's country naming can differ from common usage "
-                "— check spelling/capitalisation."
-            )
-        return fc.map(
-            lambda f: f.set("unit_name", f.get(name_field)).set("unit_id", f.get(id_field))
+    if not unit_name_field:
+        raise ValueError(
+            "--unit-name-field is required when using --breakdown "
+            "(it names the column/property in your boundary file to label each unit with)"
         )
+    import geopandas as gpd
 
-    if aoi_file:
-        if not unit_name_field:
+    gdf = gpd.read_file(aoi_file)
+    if gdf.crs is not None and gdf.crs.to_epsg() != 4326:
+        gdf = gdf.to_crs(epsg=4326)
+    if unit_name_field not in gdf.columns:
+        raise ValueError(
+            f"{unit_name_field!r} not found in {aoi_file} columns: {list(gdf.columns)}"
+        )
+    if unit_id_field and unit_id_field not in gdf.columns:
+        raise ValueError(
+            f"--unit-id-field {unit_id_field!r} not found in {aoi_file} columns: "
+            f"{list(gdf.columns)}"
+        )
+    if attribute_fields:
+        missing = [f for f in attribute_fields if f not in gdf.columns]
+        if missing:
             raise ValueError(
-                "--unit-name-field is required when using --breakdown with --aoi-file "
-                "(it names the column/property in your boundary file to label each unit with)"
-            )
-        import geopandas as gpd
-
-        gdf = gpd.read_file(aoi_file)
-        if gdf.crs is not None and gdf.crs.to_epsg() != 4326:
-            gdf = gdf.to_crs(epsg=4326)
-        if unit_name_field not in gdf.columns:
-            raise ValueError(
-                f"{unit_name_field!r} not found in {aoi_file} columns: {list(gdf.columns)}"
-            )
-        if unit_id_field and unit_id_field not in gdf.columns:
-            raise ValueError(
-                f"--unit-id-field {unit_id_field!r} not found in {aoi_file} columns: "
+                f"--attributes field(s) {missing} not found in {aoi_file} columns: "
                 f"{list(gdf.columns)}"
             )
+    features = []
+    for _, row in gdf.iterrows():
+        properties = {
+            "unit_name": row[unit_name_field],
+            "unit_id": row[unit_id_field] if unit_id_field else None,
+        }
         if attribute_fields:
-            missing = [f for f in attribute_fields if f not in gdf.columns]
-            if missing:
-                raise ValueError(
-                    f"--attributes field(s) {missing} not found in {aoi_file} columns: "
-                    f"{list(gdf.columns)}"
-                )
-        features = []
-        for _, row in gdf.iterrows():
-            properties = {
-                "unit_name": row[unit_name_field],
-                "unit_id": row[unit_id_field] if unit_id_field else None,
-            }
-            if attribute_fields:
-                for field in attribute_fields:
-                    properties[field] = row[field]
-            features.append(
-                ee.Feature(
-                    ee.Geometry(
-                        simplify_geometry(row.geometry, simplify_tolerance).__geo_interface__
-                    ),
-                    properties,
-                )
+            for field in attribute_fields:
+                properties[field] = row[field]
+        features.append(
+            ee.Feature(
+                ee.Geometry(
+                    simplify_geometry(row.geometry, simplify_tolerance).__geo_interface__
+                ),
+                properties,
             )
-        return ee.FeatureCollection(features)
-
-    raise ValueError("--breakdown needs either --aoi-name or --aoi-file (+ --unit-name-field)")
+        )
+    return ee.FeatureCollection(features)
 
 
 def fetch_period_breakdown_stats(
@@ -1421,15 +1246,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Extract a VIIRS nighttime-lights radiance time series for an AOI."
     )
-    aoi_group = p.add_mutually_exclusive_group(required=True)
-    aoi_group.add_argument("--aoi-file", help="Path to a boundary file (GeoJSON/shapefile/etc.)")
-    aoi_group.add_argument("--aoi-name", help="Country/admin name to look up in FAO GAUL")
-    aoi_group.add_argument(
-        "--aoi-iso3",
+    p.add_argument(
+        "--aoi-file",
+        required=True,
         help=(
-            "ISO 3166-1 alpha-3 country code to look up (e.g. 'UKR'). Matched against "
-            "FAO GAUL's country names automatically (GAUL doesn't carry ISO codes itself) "
-            "-- if no confident match is found, use --aoi-name with the exact GAUL name."
+            "Path to a boundary file (GeoJSON/shapefile/etc.) -- the area of interest. "
+            "This is the only way to supply an AOI; there's no built-in country/admin-name "
+            "lookup, so bring your own boundary."
         ),
     )
     p.add_argument("--start", required=True, help="Start date, YYYY-MM-DD (inclusive)")
@@ -1440,17 +1263,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         required=True,
         help=(
             "Output folder for every output file this run produces (CSV, vector, rasters, "
-            "chart). Filenames are built from --geoextent/--aoi-iso3, e.g. "
+            "chart). Filenames are built from --geoextent, e.g. "
             "'npl_nightlights.csv' -- there's no separate path to set for each output kind."
         ),
     )
     p.add_argument(
         "--geoextent",
-        default=None,
+        required=True,
         help=(
             "Geoextent code used in every output filename (e.g. 'UKR', 'crm' for a Crimea "
-            "AOI). Required with --aoi-file or --aoi-name -- with --aoi-iso3, its code is "
-            "used automatically and this can be left out."
+            "AOI). Always required -- --aoi-file has no code of its own to default to."
         ),
     )
     p.add_argument(
@@ -1500,42 +1322,35 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Instead of one AOI-wide row per period, output one row per admin unit "
-            "per period. With --aoi-name, looks up FAO GAUL admin1/admin2 units "
-            "within that country -- admin3-5 aren't available from GAUL (it only "
-            "carries levels 0-2), so those choices only work with --aoi-file. With "
-            "--aoi-file, keeps each feature in the file separate (needs "
-            "--unit-name-field) and the admin level is just a label for the output."
+            "per period, keeping each feature in --aoi-file separate (needs "
+            "--unit-name-field). The admin level is just a label for the output -- "
+            "any of admin1-5 works, however your boundary file is actually organized."
         ),
     )
     p.add_argument(
         "--unit-name-field",
         default=None,
-        help="Property/column in --aoi-file to label each unit with, when using --breakdown with --aoi-file",
+        help="Property/column in --aoi-file to label each unit with, when using --breakdown",
     )
     p.add_argument(
         "--unit-id-field",
         default=None,
         help=(
             "Property/column in --aoi-file that uniquely identifies each unit (typically a "
-            "pcode), when using --breakdown with --aoi-file. Included as its own 'unit_id' "
-            "column in the output -- unlike --unit-name-field, which is only guaranteed to be "
-            "human-readable, not unique (two municipios can share a name). With --aoi-name, "
-            "unit_id is filled in automatically from FAO GAUL's ADM1_CODE/ADM2_CODE, so this "
-            "flag isn't needed there."
+            "pcode), when using --breakdown. Included as its own 'unit_id' column in the "
+            "output -- unlike --unit-name-field, which is only guaranteed to be "
+            "human-readable, not unique (two municipios can share a name)."
         ),
     )
     p.add_argument(
         "--attributes",
         default=None,
         help=(
-            "Comma-separated list of extra property/column names from the admin data to "
-            "include as their own columns in --breakdown output. With --aoi-name these are "
-            "GAUL property names (e.g. ADM0_NAME,ADM1_NAME,ADM0_CODE); with --aoi-file these "
-            "are column names from your boundary file. If omitted, --aoi-name output defaults "
-            "to admin0_name/admin1_name/admin2_name and --aoi-file output has no extra columns "
-            "beyond unit_name -- use this to disambiguate units that share a name (e.g. two "
-            "municipios called the same thing in different states) by including their parent "
-            "unit's name/code."
+            "Comma-separated list of extra property/column names from --aoi-file to "
+            "include as their own columns in --breakdown output. If omitted, output has "
+            "no extra columns beyond unit_name -- use this to disambiguate units that "
+            "share a name (e.g. two municipios called the same thing in different states) "
+            "by including their parent unit's name/code."
         ),
     )
     p.add_argument(
@@ -1552,7 +1367,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Simplify --aoi-file geometries by this many degrees before sending to Earth "
-            "Engine (only used with --breakdown --aoi-file). Needed for detailed admin2/raion "
+            "Engine (only used with --breakdown). Needed for detailed admin2/raion "
             "layers with many units, which can exceed Earth Engine's 10MB request-payload limit "
             "otherwise. Try 0.001 (~100m) as a starting point if you hit a "
             "'Request payload size exceeds the limit' error."
@@ -1649,10 +1464,10 @@ def _prompt_yes_no(label: str, default: bool = True) -> bool:
 
 def _prompt_single_field(label: str, available_fields: Optional[list[str]]) -> str:
     """Like _prompt_text, but when `available_fields` is a known, non-empty
-    list (from list_file_fields/list_gaul_fields), re-prompts until the
-    answer is exactly one of them -- catching a typo, or someone pasting a
-    comma-separated list where one field name was expected, right where it
-    happened instead of deep inside a later Earth Engine call.
+    list (from list_file_fields), re-prompts until the answer is exactly one
+    of them -- catching a typo, or someone pasting a comma-separated list
+    where one field name was expected, right where it happened instead of
+    deep inside a later Earth Engine call.
     """
     while True:
         val = _prompt_text(label)
@@ -1716,28 +1531,6 @@ def list_file_fields(aoi_file: str) -> list[str]:
     return [c for c in gdf.columns if c != "geometry"]
 
 
-def list_gaul_fields(aoi_name: str, breakdown: str, ee_project: Optional[str] = None) -> list[str]:
-    """Return the property names on one sample FAO GAUL feature for `aoi_name`
-    at the given breakdown level, for the same reason as list_file_fields above.
-    Initializes Earth Engine itself if needed, since this can run before the
-    rest of the wizard would otherwise trigger that.
-    """
-    import ee
-
-    _ensure_ee_initialized(ee_project)
-
-    if breakdown not in GAUL_BREAKDOWN_LEVELS:
-        raise ValueError(
-            f"FAO GAUL doesn't have {breakdown} units -- it only goes down to admin2"
-        )
-    asset_id = GAUL_BREAKDOWN_LEVELS[breakdown][0]
-    fc = ee.FeatureCollection(asset_id).filter(ee.Filter.eq("ADM0_NAME", aoi_name))
-    if fc.size().getInfo() == 0:
-        return []
-    props = fc.first().propertyNames().getInfo()
-    return [p for p in props if p != "system:index"]
-
-
 def run_wizard() -> list[str]:
     """Interactively ask for each option and return the equivalent argv list.
 
@@ -1754,25 +1547,8 @@ def run_wizard() -> list[str]:
     ee_project: Optional[str] = None  # asked for once, as soon as it's actually needed
     ee_project_asked = False  # distinguishes "asked, left blank" from "not asked yet"
 
-    aoi_choice = _prompt_choice(
-        "Area of interest",
-        [
-            "Look up a country by ISO 3166-1 alpha-3 code (e.g. 'UKR')",
-            "Look up a country or admin unit by name (FAO GAUL)",
-            "Supply my own boundary file (shapefile, GeoJSON, or geodatabase)",
-        ],
-    )
-    gaul_country_name: Optional[str] = None  # resolved lazily, only if actually needed below
-    if aoi_choice == 0:
-        aoi_iso3 = _prompt_text("ISO3 country code (e.g. 'UKR', 'USA', 'KOR')").strip().upper()
-        argv += ["--aoi-iso3", aoi_iso3]
-    elif aoi_choice == 1:
-        aoi_name = _prompt_text("Country or admin-unit name (e.g. 'Ukraine')")
-        argv += ["--aoi-name", aoi_name]
-        gaul_country_name = aoi_name
-    else:
-        aoi_file = _prompt_text("Path to your boundary file")
-        argv += ["--aoi-file", aoi_file]
+    aoi_file = _prompt_text("Path to your boundary file (shapefile, GeoJSON, or geodatabase)")
+    argv += ["--aoi-file", aoi_file]
 
     admin_level_labels = [
         "Admin 0 -- whole AOI as a single unit (one time series)",
@@ -1782,109 +1558,60 @@ def run_wizard() -> list[str]:
         "Admin 4 (e.g. village/sub-ward)",
         "Admin 5 (finest level your data has)",
     ]
-    if aoi_choice == 2:  # own file -- the level is just a label, any depth is fine
-        granularity_options = admin_level_labels
-    else:  # GAUL-backed -- FAO GAUL 2015 only carries country/admin1/admin2
-        granularity_options = admin_level_labels[:3]
-        print(
-            "\n(FAO GAUL only goes down to admin2 -- for admin3 or finer, supply your "
-            "own boundary file instead.)"
-        )
-    breakdown_choice = _prompt_choice("Granularity", granularity_options)
+    breakdown_choice = _prompt_choice("Granularity", admin_level_labels)
+    available_fields: list[str] = []
     if breakdown_choice != 0:
         breakdown = f"admin{breakdown_choice}"
         argv += ["--breakdown", breakdown]
 
-        if aoi_choice == 2:  # own file
-            available_fields: list[str] = []
-            try:
-                available_fields = list_file_fields(aoi_file)
-            except Exception as e:  # noqa: BLE001
-                print(f"  (Couldn't read {aoi_file} to list its columns: {e})")
-            if available_fields:
-                print(f"\nColumns found in {aoi_file}:")
-                for f in available_fields:
-                    print(f"  - {f}")
+        try:
+            available_fields = list_file_fields(aoi_file)
+        except Exception as e:  # noqa: BLE001
+            print(f"  (Couldn't read {aoi_file} to list its columns: {e})")
+        if available_fields:
+            print(f"\nColumns found in {aoi_file}:")
+            for f in available_fields:
+                print(f"  - {f}")
 
-            argv += [
-                "--unit-name-field",
-                _prompt_single_field("Which column names each unit", available_fields),
-            ]
+        argv += [
+            "--unit-name-field",
+            _prompt_single_field("Which column names each unit", available_fields),
+        ]
 
-            unit_id_field = _prompt_optional_field(
-                "Which column uniquely identifies each unit, e.g. a pcode "
-                "(recommended, especially if unit names might repeat -- blank to skip)",
-                available_fields,
-            )
-            if unit_id_field:
-                argv += ["--unit-id-field", unit_id_field]
+        unit_id_field = _prompt_optional_field(
+            "Which column uniquely identifies each unit, e.g. a pcode "
+            "(recommended, especially if unit names might repeat -- blank to skip)",
+            available_fields,
+        )
+        if unit_id_field:
+            argv += ["--unit-id-field", unit_id_field]
 
-            file_size_mb = None
-            try:
-                file_size_mb = Path(aoi_file).stat().st_size / (1024 * 1024)
-            except OSError:
-                pass
-            tolerance_prompt = (
-                "Simplify geometries by this many degrees before sending to Earth Engine "
-                "(blank to skip; try 0.001 for ~100m if you hit a "
-                "'Request payload size exceeds the limit' error)"
-            )
-            if file_size_mb and file_size_mb > 2:
-                print(
-                    f"\n{aoi_file} is {file_size_mb:.1f} MB -- a detailed boundary file this "
-                    "size can exceed Earth Engine's 10MB request-payload limit once every "
-                    "unit's full geometry is sent as part of a --breakdown query."
-                )
-            while True:
-                tolerance = _prompt_text(tolerance_prompt, default="").strip()
-                if not tolerance:
-                    break
-                try:
-                    float(tolerance)
-                    argv += ["--simplify-tolerance", tolerance]
-                    break
-                except ValueError:
-                    print(f"  '{tolerance}' isn't a number -- enter a decimal-degree value or leave blank.")
-        else:  # GAUL-backed, either ISO3 or name
-            ee_project = _prompt_text(
-                "Earth Engine cloud project ID (blank if your account doesn't need one)",
-                default="",
-            ).strip() or None
-            ee_project_asked = True
-
-            if gaul_country_name is None:  # came in via ISO3 -- resolve it to look up fields
-                try:
-                    gaul_country_name = resolve_iso3_to_gaul_name(aoi_iso3, ee_project)
-                    print(f"ISO3 {aoi_iso3!r} matched FAO GAUL country {gaul_country_name!r}.")
-                except Exception as e:  # noqa: BLE001
-                    print(f"  (Couldn't resolve ISO3 {aoi_iso3!r} to a GAUL country yet: {e})")
-
+        file_size_mb = None
+        try:
+            file_size_mb = Path(aoi_file).stat().st_size / (1024 * 1024)
+        except OSError:
+            pass
+        tolerance_prompt = (
+            "Simplify geometries by this many degrees before sending to Earth Engine "
+            "(blank to skip; try 0.001 for ~100m if you hit a "
+            "'Request payload size exceeds the limit' error)"
+        )
+        if file_size_mb and file_size_mb > 2:
             print(
-                f"(Each unit's unique ID will be filled in automatically from GAUL's own "
-                f"ADM{1 if breakdown == 'admin1' else 2}_CODE -- no need to pick one.)"
+                f"\n{aoi_file} is {file_size_mb:.1f} MB -- a detailed boundary file this "
+                "size can exceed Earth Engine's 10MB request-payload limit once every "
+                "unit's full geometry is sent as part of a --breakdown query."
             )
-
-            available_fields = []
-            if gaul_country_name:
-                print(
-                    f"\nLooking up available fields on FAO GAUL {breakdown} units for "
-                    f"{gaul_country_name!r} ..."
-                )
-                try:
-                    available_fields = list_gaul_fields(gaul_country_name, breakdown, ee_project)
-                except Exception as e:  # noqa: BLE001
-                    print(f"  (Couldn't look up GAUL fields: {e})")
-            if available_fields:
-                print(f"Fields available on GAUL {breakdown} units for {gaul_country_name!r}:")
-                for f in available_fields:
-                    print(f"  - {f}")
-            else:
-                print(
-                    "  (Couldn't confirm available fields -- common GAUL fields are "
-                    "ADM0_NAME, ADM0_CODE, ADM1_NAME, ADM1_CODE"
-                    + (", ADM2_NAME, ADM2_CODE" if breakdown == "admin2" else "")
-                    + ", STATUS, DISP_AREA)"
-                )
+        while True:
+            tolerance = _prompt_text(tolerance_prompt, default="").strip()
+            if not tolerance:
+                break
+            try:
+                float(tolerance)
+                argv += ["--simplify-tolerance", tolerance]
+                break
+            except ValueError:
+                print(f"  '{tolerance}' isn't a number -- enter a decimal-degree value or leave blank.")
 
         attrs = _prompt_field_list(
             "Extra attribute columns to include, comma-separated "
@@ -1902,10 +1629,9 @@ def run_wizard() -> list[str]:
     argv += ["--freq", freq_options[freq_choice]]
 
     argv += ["--out-dir", _prompt_text("Output folder for all outputs", default="out")]
-    if aoi_choice != 0:  # not --aoi-iso3 -- no ISO3 to default the geoextent code to
-        geoextent = _prompt_text("Geoextent code for output filenames (e.g. 'UKR', 'crm')").strip()
-        if geoextent:
-            argv += ["--geoextent", geoextent]
+    geoextent = _prompt_text("Geoextent code for output filenames (e.g. 'UKR', 'crm')").strip()
+    if geoextent:
+        argv += ["--geoextent", geoextent]
 
     if _prompt_yes_no(
         "Also write spatial output (GeoJSON/Shapefile), joined by the unit's unique "
@@ -1984,19 +1710,19 @@ def build_argv_from_form(fields: dict) -> list[str]:
 
     Expected keys (all optional except as noted; unmentioned/None/empty
     values are treated as "not set"):
-        aoi_source: "iso3" | "name" | "file"  (required)
-        aoi_iso3, aoi_name, aoi_file: str -- whichever matches aoi_source
+        aoi_file: str -- path to the boundary file (required; this tool only
+            supports a supplied boundary file as the area of interest, not a
+            country/admin-name lookup)
         breakdown_level: int 0-5 (0 or omitted = no --breakdown, whole AOI)
-        unit_name_field: str -- required when aoi_source == "file" and
-            breakdown_level > 0
+        unit_name_field: str -- required when breakdown_level > 0
         unit_id_field: str
-        simplify_tolerance: str/float -- only meaningful with aoi_source == "file"
+        simplify_tolerance: str/float
         attributes: str (comma-separated) or list[str]
         start, end: str, YYYY-MM-DD (required)
         freq: one of VALID_FREQS (required)
         out_dir: str, output folder for every output this run produces (required)
-        geoextent: str -- geoextent code used in every output filename; required
-            when aoi_source isn't "iso3" (auto from the ISO3 code otherwise)
+        geoextent: str -- geoextent code used in every output filename (required --
+            the boundary file has no code of its own to default to)
         vector_out: "geojson" | "shapefile" | None -- also write spatial output
             joined to the boundary geometry, in addition to the CSV, in this format
         include_yoy: bool -- add <stat>_yoy_abs/_pct columns vs. the same period one
@@ -2022,57 +1748,36 @@ def build_argv_from_form(fields: dict) -> list[str]:
     """
     argv: list[str] = []
 
-    aoi_source = fields.get("aoi_source")
-    if aoi_source == "iso3":
-        iso3 = (fields.get("aoi_iso3") or "").strip().upper()
-        if not iso3:
-            raise ValueError("Enter an ISO3 country code (e.g. 'UKR').")
-        argv += ["--aoi-iso3", iso3]
-    elif aoi_source == "name":
-        name = (fields.get("aoi_name") or "").strip()
-        if not name:
-            raise ValueError("Enter a country or admin-unit name.")
-        argv += ["--aoi-name", name]
-    elif aoi_source == "file":
-        path = (fields.get("aoi_file") or "").strip()
-        if not path:
-            raise ValueError("Choose a boundary file.")
-        argv += ["--aoi-file", path]
-    else:
-        raise ValueError("Choose an area-of-interest source (ISO3 code, name, or file).")
+    path = (fields.get("aoi_file") or "").strip()
+    if not path:
+        raise ValueError("Choose a boundary file.")
+    argv += ["--aoi-file", path]
 
     breakdown_level = fields.get("breakdown_level") or 0
     if breakdown_level:
         if breakdown_level not in (1, 2, 3, 4, 5):
             raise ValueError("Granularity must be Admin 0-5.")
-        if aoi_source != "file" and breakdown_level > 2:
-            raise ValueError(
-                f"Admin{breakdown_level} isn't available with a country lookup -- FAO GAUL "
-                "only carries admin1/admin2 below country level. Supply your own boundary "
-                "file for admin3 or finer."
-            )
         argv += ["--breakdown", f"admin{breakdown_level}"]
 
-        if aoi_source == "file":
-            unit_name_field = (fields.get("unit_name_field") or "").strip()
-            if not unit_name_field:
-                raise ValueError("Choose which column names each unit.")
-            argv += ["--unit-name-field", unit_name_field]
+        unit_name_field = (fields.get("unit_name_field") or "").strip()
+        if not unit_name_field:
+            raise ValueError("Choose which column names each unit.")
+        argv += ["--unit-name-field", unit_name_field]
 
-            unit_id_field = (fields.get("unit_id_field") or "").strip()
-            if unit_id_field:
-                argv += ["--unit-id-field", unit_id_field]
+        unit_id_field = (fields.get("unit_id_field") or "").strip()
+        if unit_id_field:
+            argv += ["--unit-id-field", unit_id_field]
 
-            tolerance = fields.get("simplify_tolerance")
-            if tolerance not in (None, ""):
-                try:
-                    float(tolerance)
-                except (TypeError, ValueError):
-                    raise ValueError(
-                        f"Simplify tolerance {tolerance!r} isn't a number -- enter a "
-                        "decimal-degree value (e.g. 0.001) or leave it blank."
-                    )
-                argv += ["--simplify-tolerance", str(tolerance)]
+        tolerance = fields.get("simplify_tolerance")
+        if tolerance not in (None, ""):
+            try:
+                float(tolerance)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"Simplify tolerance {tolerance!r} isn't a number -- enter a "
+                    "decimal-degree value (e.g. 0.001) or leave it blank."
+                )
+            argv += ["--simplify-tolerance", str(tolerance)]
 
         attributes = fields.get("attributes")
         if attributes:
@@ -2099,15 +1804,12 @@ def build_argv_from_form(fields: dict) -> list[str]:
     argv += ["--out-dir", out_dir]
 
     geoextent = (fields.get("geoextent") or "").strip()
-    if aoi_source != "iso3" and not geoextent:
+    if not geoextent:
         raise ValueError(
-            "Enter a geoextent code for output filenames (e.g. 'UKR') -- needed "
-            "when not using an ISO3 country code."
+            "Enter a geoextent code for output filenames (e.g. 'crm') -- the boundary "
+            "file has no code of its own to default to."
         )
-    if geoextent:
-        # Optional (and overrides the automatic ISO3 code) when --aoi-iso3
-        # is used; required otherwise -- see resolve_geoextent().
-        argv += ["--geoextent", geoextent]
+    argv += ["--geoextent", geoextent]
 
     vector_out = fields.get("vector_out")
     if vector_out:
@@ -2190,7 +1892,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
 
     try:
-        geoextent = resolve_geoextent(args.aoi_iso3, args.geoextent)
+        geoextent = resolve_geoextent(args.geoextent)
     except ValueError as e:
         print(str(e), file=sys.stderr)
         return 1
@@ -2211,20 +1913,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         return 1
 
-    if args.aoi_iso3:
-        try:
-            resolved_name = resolve_iso3_to_gaul_name(args.aoi_iso3)
-        except ValueError as e:
-            print(str(e), file=sys.stderr)
-            return 1
-        print(
-            f"ISO3 code {args.aoi_iso3.upper()!r} matched FAO GAUL country {resolved_name!r}.",
-            file=sys.stderr,
-        )
-        # From here on, treat it exactly like --aoi-name — every other code path
-        # (single-AOI lookup, --breakdown, etc.) already knows how to handle that.
-        args.aoi_name = resolved_name
-
     rows = []
     unit_name_column = "unit_name"
     unit_id_column: Optional[str] = "unit_id"
@@ -2232,7 +1920,6 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.breakdown:
         fc = resolve_breakdown_collection(
             args.aoi_file,
-            args.aoi_name,
             args.breakdown,
             args.unit_name_field,
             simplify_tolerance=args.simplify_tolerance,
@@ -2240,15 +1927,11 @@ def main(argv: Optional[list[str]] = None) -> int:
             unit_id_field=args.unit_id_field,
         )
         # Output columns should say what they actually are -- the column the
-        # user picked as --unit-name-field/--unit-id-field for a boundary
-        # file, or the GAUL property that filled them in automatically for a
-        # country/name lookup -- rather than a generic 'unit_name'/'unit_id'
-        # label. See rename_unit_columns() for where this is applied.
-        if args.aoi_file:
-            unit_name_column = args.unit_name_field
-            unit_id_column = args.unit_id_field or "unit_id"
-        else:
-            unit_name_column, unit_id_column = gaul_unit_name_id_fields(args.breakdown)
+        # user picked as --unit-name-field/--unit-id-field -- rather than a
+        # generic 'unit_name'/'unit_id' label. See rename_unit_columns() for
+        # where this is applied.
+        unit_name_column = args.unit_name_field
+        unit_id_column = args.unit_id_field or "unit_id"
         unit_count = fc.size().getInfo()
         print(f"Breaking down into {unit_count} {args.breakdown} units.", file=sys.stderr)
         for i, period in enumerate(periods, 1):
@@ -2263,7 +1946,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 )
             )
     else:
-        aoi_geom = resolve_aoi_geometry(args.aoi_file, args.aoi_name)
+        aoi_geom = resolve_aoi_geometry(args.aoi_file)
         for i, period in enumerate(periods, 1):
             print(f"[{i}/{len(periods)}] {period.label} ...", file=sys.stderr)
             rows.append(
@@ -2416,9 +2099,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         # Always the whole AOI, regardless of --breakdown -- raster export
         # isn't per-unit, so resolve the AOI geometry directly rather than
         # via the --breakdown feature collection.
-        raster_aoi_geom = aoi_geom if not args.breakdown else resolve_aoi_geometry(
-            args.aoi_file, args.aoi_name
-        )
+        raster_aoi_geom = aoi_geom if not args.breakdown else resolve_aoi_geometry(args.aoi_file)
         raster_dir = out_dir
 
         if args.raster_whole_aoi:

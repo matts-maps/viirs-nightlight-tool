@@ -55,24 +55,13 @@ def test_form_is_wrapped_in_a_scrollable_canvas():
 
 
 def test_geoextent_field_always_visible():
-    # The geoextent code feeds every output filename -- it's optional (and
-    # overrides the automatic ISO3 code) with --aoi-iso3, required
-    # otherwise, but shown unconditionally either way so it's never a
-    # surprise which filename a run is going to produce.
+    # The geoextent code feeds every output filename -- every AOI now comes
+    # from --aoi-file, which has no code of its own to default to, so this
+    # is always required and always shown.
     root, gui = _make_gui()
     try:
         assert gui.geoextent_entry.grid_info()
-
-        gui.aoi_source.set("name")
-        gui._on_aoi_source_change()
-        assert gui.geoextent_entry.grid_info()
-
-        gui.aoi_source.set("file")
-        gui._on_aoi_source_change()
-        assert gui.geoextent_entry.grid_info()
-
-        gui.aoi_source.set("iso3")
-        gui._on_aoi_source_change()
+        gui._on_granularity_change()
         assert gui.geoextent_entry.grid_info()
     finally:
         _destroy(root)
@@ -151,8 +140,7 @@ def test_csv_checkbox_is_locked_on():
 def test_collect_fields_reflects_outputs_section():
     root, gui = _make_gui()
     try:
-        gui.aoi_source.set("iso3")
-        gui.aoi_iso3.set("UKR")
+        gui.aoi_file.set("aoi.geojson")
         gui.start.set("2026-01-01")
         gui.end.set("2026-02-01")
         gui.out_dir.set("out")
